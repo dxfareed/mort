@@ -14,10 +14,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const app = express();
 app.use(express.json());
 
-// Store user conversation history with TTL
 const userStates = new Map();
-const firstTimeUsers = new Set(); // Track users who have already been welcomed
-const CONVERSATION_TTL = 30 * 60 * 1000; // 30 minutes
+const firstTimeUsers = new Set();
+const CONVERSATION_TTL = 30 * 60 * 1000;
 
 // Initialize Gemini AI
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });

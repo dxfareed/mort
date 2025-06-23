@@ -2,6 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import express from "express";
 import axios from "axios";
 import { initializeApp } from "firebase/app";
+import { getFirestore, collection, addDoc, doc, setDoc, updateDoc, getDoc, query, where, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
 import dotenv from "dotenv";
 
 dotenv.config();

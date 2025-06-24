@@ -652,14 +652,15 @@ async function getWalletBalance(w) {
                 chain: 'avalanche-fuji',
                 display_values: {
                     eth: formatEther(balance),
-                    usd:"ftch later from gecko / chainlink",
+                    usd: "ftch later from gecko / chainlink",
                 }
             }]
         };
     } catch (error) {
         console.error("❌ Error fetching wallet balance:", error);
         throw error;
-    }}
+    }
+}
 
 async function sendTransaction(user, toAddress, amount) {
     try {
@@ -762,7 +763,7 @@ async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
         try {
             const txHash = await sendTransaction(user, transaction.toAddress, transaction.amount);
 
-            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nYour transaction is being processed on the blockchain.`);
+            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nView transaction details on Snowscan:\nhttps://testnet.snowscan.xyz/tx/${txHash}\n\nYour transaction is being processed on the blockchain.`);
 
             // Update user transaction count
             const userRef = doc(db, 'users', userPhoneNumber);

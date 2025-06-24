@@ -642,7 +642,7 @@ async function sendGamesMenu(to, user) {
                                 type: "reply",
                                 reply: {
                                     id: "rock_paper_scissors",
-                                    title: "✂️ Rock Paper Scissors"
+                                    title: "✂️ Rock Paper"
                                 }
                             },
                             {

@@ -16,6 +16,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
+const PORT = process.env.PORT;
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -202,6 +203,28 @@ app.post("/webhook", async (req, res) => {
             if (buttonId === "view_balance") {
                 const user = await getUserFromDatabase(userPhoneNumber);
                 await handleViewBalance(userPhoneNumber, user);
+                return res.sendStatus(200);
+            }
+
+            // Handle game button clicks
+            if (buttonId === "flip_it") {
+                console.log("🎮 User clicked Flip It game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "🎲 Flip It game - This feature coming soon!");
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "rock_paper_scissors") {
+                console.log("🎮 User clicked Rock Paper Scissors game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "✂️ Rock Paper Scissors game - This feature coming soon!");
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "guess_number") {
+                console.log("🎮 User clicked Guess the Number game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "🔢 Guess the Number game - This feature coming soon!");
                 return res.sendStatus(200);
             }
         }
@@ -580,14 +603,72 @@ async function sendWalletMenu(to, user) {
     }
 }
 
+// ========== Games Menu ==========
+async function sendGamesMenu(to, user) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+                "Content-Type": "application/json",
+            },
+            data: {
+                messaging_product: "whatsapp",
+                to,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: {
+                        type: "text",
+                        text: `🎮 ${user.username}'s Games`
+                    },
+                    body: {
+                        text: `Welcome to Games!\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nChoose a game to play:`
+                    },
+                    footer: {
+                        text: "Play • Earn • Have Fun"
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "flip_it",
+                                    title: "🎲 Flip It"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "rock_paper_scissors",
+                                    title: "✂️ Rock Paper Scissors"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "guess_number",
+                                    title: "🔢 Guess Number"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        });
+        console.log("✅ Games menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending games menu:", error);
+        await sendMessage(to, `🎮 Welcome to Games, ${user.username}!\n\nType:\n/flip - Flip It\n/rps - Rock Paper Scissors\n/guess - Guess the Number`);
+    }
+}
+
 // ========== Handle User Selection ==========
 async function handleUserSelection(userPhoneNumber, selection, user) {
     if (selection === "/games") {
-        const response = `🎮 Welcome to Games, ${user.username}!\n\nHere you can:\n• Play interactive games\n• Check game statistics\n• Compete with friends\n• Earn crypto rewards\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nWhat would you like to do? Just ask me anything about games!`;
-        await sendMessage(userPhoneNumber, response);
-
-        // Initialize AI conversation for this user after selection
-        initializeUserChat(userPhoneNumber, selection, user);
+        // Send games menu with interactive buttons
+        await sendGamesMenu(userPhoneNumber, user);
     } else if (selection === "/wallet") {
         // Send wallet menu with interactive buttons
         await sendWalletMenu(userPhoneNumber, user);
@@ -777,7 +858,7 @@ async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
         try {
             const txHash = await sendTransaction(user, transaction.toAddress, transaction.amount);
 
-            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nYour transaction is being processed on the blockchain.`);
+            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nView transaction details on Snowscan:\nhttps://testnet.snowscan.xyz/tx/${txHash}\n\nYour transaction is being processed on the blockchain.`);
 
             // Update user transaction count
             const userRef = doc(db, 'users', userPhoneNumber);
@@ -890,8 +971,8 @@ async function sendMessage(to, body) {
     }
 }
 
-app.listen(8000, () => {
-    console.log("🚀 Web3 ChatBot Server running on port 8000");
+app.listen(PORT, () => {
+    console.log("🚀 Web3 ChatBot Server running on port", PORT);
     console.log("🔐 Security: bcrypt pin hashing enabled");
     console.log("💾 Database: Firestore integration active");
     console.log("🤖 AI: Gemini 2.0 Flash ready");

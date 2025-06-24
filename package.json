@@ -8,6 +8,9 @@
     "test": "node index",
     "start": "node index"
   },
+  "engines": {
+    "node": "22.10.0"
+  },
   "keywords": [
     "wallet",
     "chainlink"

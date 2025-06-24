@@ -204,6 +204,25 @@ app.post("/webhook", async (req, res) => {
                 await handleViewBalance(userPhoneNumber, user);
                 return res.sendStatus(200);
             }
+
+            // Handle game selections
+            if (buttonId === "flip_it_game") {
+                console.log("🎮 User clicked: Flip It game");
+                await sendMessage(userPhoneNumber, "🎯 Flip It - Coming Soon! 🚀\n\nThis exciting coin flip game will be available soon. Stay tuned!");
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "rock_paper_scissors_game") {
+                console.log("🎮 User clicked: Rock Paper Scissors game");
+                await sendMessage(userPhoneNumber, "✂️ Rock Paper Scissors - Coming Soon! 🚀\n\nThis classic game will be available soon. Get ready to compete!");
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "guess_number_game") {
+                console.log("🎮 User clicked: Guess the Number game");
+                await sendMessage(userPhoneNumber, "🔢 Guess the Number - Coming Soon! 🚀\n\nThis number guessing game will be available soon. Test your luck!");
+                return res.sendStatus(200);
+            }
         }
 
         // Handle text messages
@@ -580,14 +599,72 @@ async function sendWalletMenu(to, user) {
     }
 }
 
+// ========== Games Menu ==========
+async function sendGamesMenu(to, user) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+                "Content-Type": "application/json",
+            },
+            data: {
+                messaging_product: "whatsapp",
+                to,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: {
+                        type: "text",
+                        text: `🎮 ${user.username}'s Gaming Zone`
+                    },
+                    body: {
+                        text: `Welcome to Gaming Zone! 🎯\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nChoose a game to play:`
+                    },
+                    footer: {
+                        text: "Play • Earn • Have Fun!"
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "flip_it_game",
+                                    title: "🎯 Flip It"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "rock_paper_scissors_game",
+                                    title: "✂️ Rock Paper Scissors"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "guess_number_game",
+                                    title: "🔢 Guess the Number"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        });
+        console.log("✅ Games menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending games menu:", error);
+        await sendMessage(to, `🎮 Welcome to Games, ${user.username}!\n\nAvailable games:\n/flip it\n/rock paper and scissor\n/guess the number\n\nAll games coming soon!`);
+    }
+}
+
 // ========== Handle User Selection ==========
 async function handleUserSelection(userPhoneNumber, selection, user) {
     if (selection === "/games") {
-        const response = `🎮 Welcome to Games, ${user.username}!\n\nHere you can:\n• Play interactive games\n• Check game statistics\n• Compete with friends\n• Earn crypto rewards\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nWhat would you like to do? Just ask me anything about games!`;
-        await sendMessage(userPhoneNumber, response);
-
-        // Initialize AI conversation for this user after selection
-        initializeUserChat(userPhoneNumber, selection, user);
+        // Send games menu with interactive buttons
+        await sendGamesMenu(userPhoneNumber, user);
     } else if (selection === "/wallet") {
         // Send wallet menu with interactive buttons
         await sendWalletMenu(userPhoneNumber, user);

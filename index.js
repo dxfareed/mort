@@ -16,6 +16,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
+const PORT = process.env.PORT;
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -205,22 +206,25 @@ app.post("/webhook", async (req, res) => {
                 return res.sendStatus(200);
             }
 
-            // Handle game selections
-            if (buttonId === "flip_it_game") {
-                console.log("🎮 User clicked: Flip It game");
-                await sendMessage(userPhoneNumber, "🎯 Flip It - Coming Soon! 🚀\n\nThis exciting coin flip game will be available soon. Stay tuned!");
+            // Handle game button clicks
+            if (buttonId === "flip_it") {
+                console.log("🎮 User clicked Flip It game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "🎲 Flip It game - This feature coming soon!");
                 return res.sendStatus(200);
             }
 
-            if (buttonId === "rock_paper_scissors_game") {
-                console.log("🎮 User clicked: Rock Paper Scissors game");
-                await sendMessage(userPhoneNumber, "✂️ Rock Paper Scissors - Coming Soon! 🚀\n\nThis classic game will be available soon. Get ready to compete!");
+            if (buttonId === "rock_paper_scissors") {
+                console.log("🎮 User clicked Rock Paper Scissors game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "✂️ Rock Paper Scissors game - This feature coming soon!");
                 return res.sendStatus(200);
             }
 
-            if (buttonId === "guess_number_game") {
-                console.log("🎮 User clicked: Guess the Number game");
-                await sendMessage(userPhoneNumber, "🔢 Guess the Number - Coming Soon! 🚀\n\nThis number guessing game will be available soon. Test your luck!");
+            if (buttonId === "guess_number") {
+                console.log("🎮 User clicked Guess the Number game");
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await sendMessage(userPhoneNumber, "🔢 Guess the Number game - This feature coming soon!");
                 return res.sendStatus(200);
             }
         }
@@ -617,35 +621,35 @@ async function sendGamesMenu(to, user) {
                     type: "button",
                     header: {
                         type: "text",
-                        text: `🎮 ${user.username}'s Gaming Zone`
+                        text: `🎮 ${user.username}'s Games`
                     },
                     body: {
-                        text: `Welcome to Gaming Zone! 🎯\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nChoose a game to play:`
+                        text: `Welcome to Games!\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nChoose a game to play:`
                     },
                     footer: {
-                        text: "Play • Earn • Have Fun!"
+                        text: "Play • Earn • Have Fun"
                     },
                     action: {
                         buttons: [
                             {
                                 type: "reply",
                                 reply: {
-                                    id: "flip_it_game",
-                                    title: "🎯 Flip It"
+                                    id: "flip_it",
+                                    title: "🎲 Flip It"
                                 }
                             },
                             {
                                 type: "reply",
                                 reply: {
-                                    id: "rock_paper_scissors_game",
+                                    id: "rock_paper_scissors",
                                     title: "✂️ Rock Paper Scissors"
                                 }
                             },
                             {
                                 type: "reply",
                                 reply: {
-                                    id: "guess_number_game",
-                                    title: "🔢 Guess the Number"
+                                    id: "guess_number",
+                                    title: "🔢 Guess Number"
                                 }
                             }
                         ]
@@ -656,7 +660,7 @@ async function sendGamesMenu(to, user) {
         console.log("✅ Games menu sent to:", to);
     } catch (error) {
         console.error("❌ Error sending games menu:", error);
-        await sendMessage(to, `🎮 Welcome to Games, ${user.username}!\n\nAvailable games:\n/flip it\n/rock paper and scissor\n/guess the number\n\nAll games coming soon!`);
+        await sendMessage(to, `🎮 Welcome to Games, ${user.username}!\n\nType:\n/flip - Flip It\n/rps - Rock Paper Scissors\n/guess - Guess the Number`);
     }
 }
 
@@ -953,8 +957,8 @@ async function sendMessage(to, body) {
     }
 }
 
-app.listen(8000, () => {
-    console.log("🚀 Web3 ChatBot Server running on port 8000");
+app.listen(PORT, () => {
+    console.log("🚀 Web3 ChatBot Server running on port", PORT);
     console.log("🔐 Security: bcrypt pin hashing enabled");
     console.log("💾 Database: Firestore integration active");
     console.log("🤖 AI: Gemini 2.0 Flash ready");

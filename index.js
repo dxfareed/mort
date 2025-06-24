@@ -727,19 +727,33 @@ async function getWalletBalance(w) {
             address: w,
         });
 
+        const amount_usd = await fetchAvaxPrice() * formatEther(balance);
+
         return {
             balances: [{
                 asset: 'eth',
                 chain: 'avalanche-fuji',
                 display_values: {
                     eth: formatEther(balance),
-                    usd: "ftch later from gecko / chainlink",
+                    usd: amount_usd,
                 }
             }]
         };
     } catch (error) {
         console.error("❌ Error fetching wallet balance:", error);
         throw error;
+    }
+}
+
+
+async function fetchAvaxPrice() {
+    try {
+        const response = await fetch(process.env.COINGECKO_API);
+        const data = await response.json();
+        return data['avalanche-2'].usd
+    } catch (error) {
+        console.error(error.message);
+        return null;
     }
 }
 

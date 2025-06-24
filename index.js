@@ -5,11 +5,14 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, doc, setDoc, updateDoc, getDoc, query, where, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
+import { PrivyClient } from '@privy-io/server-auth';
 dotenv.config();
 
 const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
+const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -24,6 +27,7 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+const privy = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET);
 
 const app = express();
 app.use(express.json());
@@ -105,6 +109,31 @@ async function updateUserLastSeen(whatsappId) {
         });
     } catch (error) {
         console.error("❌ Error updating last seen:", error);
+    }
+}
+
+async function createWalletForUser(username) {
+    try {
+        console.log("🔗 Creating wallet for user:", username);
+
+        // Create Ethereum wallet using Privy
+        const { id, address, chainType } = await privy.walletApi.create({
+            chainType: 'ethereum'
+        });
+
+        console.log("✅ Wallet created successfully:");
+        console.log("   - Wallet ID:", id);
+        console.log("   - Address:", address);
+        console.log("   - Chain Type:", chainType);
+
+        return {
+            walletId: id,
+            address: address,
+            chainType: chainType
+        };
+    } catch (error) {
+        console.error("❌ Error creating wallet:", error);
+        throw error;
     }
 }
 
@@ -402,6 +431,10 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
         const hashedPin = await hashPin(state.pin);
         const now = new Date().toISOString();
 
+        // Create wallet using Privy
+        await sendMessage(userPhoneNumber, "🔗 Creating your secure wallet...");
+        const walletData = await createWalletForUser(state.username);
+
         const userData = {
             whatsappId: userPhoneNumber,
             username: state.username,
@@ -411,9 +444,10 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
                 pinSetAt: now
             },
             wallet: {
-                primaryAddress: "", // Will be generated later
+                primaryAddress: walletData.address,
+                walletId: walletData.walletId,
+                chainType: walletData.chainType,
                 balance: {
-                    USDC: "0",
                     ETH: "0"
                 },
                 lastBalanceUpdate: now
@@ -433,7 +467,7 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
             // Clear registration state
             registrationStates.delete(userPhoneNumber);
 
-            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n✅ Email: ${state.email}\n✅ Security PIN: Set\n\nWelcome to Web3 ChatBot! You can now start playing games and managing your crypto wallet.`);
+            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n✅ Email: ${state.email}\n✅ Security PIN: Set\n💰 Wallet Address: ${walletData.address}\n\nWelcome to Mort! Your secure Ethereum wallet has been created and you can now start playing games and managing your crypto.`);
 
             // Send welcome options
             setTimeout(async () => {
@@ -460,7 +494,7 @@ async function handleUserSelection(userPhoneNumber, selection, user) {
     if (selection === "/games") {
         response = `🎮 Welcome to Games, ${user.username}!\n\nHere you can:\n• Play interactive games\n• Check game statistics\n• Compete with friends\n• Earn crypto rewards\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nWhat would you like to do? Just ask me anything about games!`;
     } else if (selection === "/wallet") {
-        response = `💰 Welcome to Wallet, ${user.username}!\n\nYour Wallet:\n• USDC Balance: ${user.wallet.balance.USDC}\n• ETH Balance: ${user.wallet.balance.ETH}\n• Total Transactions: ${user.stats.transactionCount}\n\nYou can:\n• Check your balance\n• View transaction history\n• Send/receive payments\n• Manage your account\n\nWhat would you like to do with your wallet?`;
+        response = `💰 Welcome to Wallet, ${user.username}!\n\nYour Wallet:\n• Address: ${user.wallet.primaryAddress}\n• ETH Balance: ${user.wallet.balance.ETH}\n• Total Transactions: ${user.stats.transactionCount}\n\nYou can:\n• Check your balance\n• View transaction history\n• Send/receive payments\n• Manage your account\n\nWhat would you like to do with your wallet?`;
     }
 
     await sendMessage(userPhoneNumber, response);
@@ -473,7 +507,7 @@ async function handleUserSelection(userPhoneNumber, selection, user) {
 function initializeUserChat(userPhoneNumber, selectedOption, user) {
     const contextInstruction = selectedOption === "/games"
         ? `You are a helpful gaming assistant for ${user.username}. Help users with game-related queries, provide gaming tips, and make the experience fun and engaging. The user has played ${user.stats.gamesPlayed} games and earned ${user.stats.totalEarned} tokens so far.`
-        : `You are a helpful wallet and financial assistant for ${user.username}. Help users with wallet operations, transaction queries, and provide financial guidance while being secure and professional. Current balance: USDC ${user.wallet.balance.USDC}, ETH ${user.wallet.balance.ETH}.`;
+        : `You are a helpful wallet and financial assistant for ${user.username}. Help users with wallet operations, transaction queries, and provide financial guidance while being secure and professional. ETH ${user.wallet.balance.ETH}.`;
 
     const userChat = ai.chats.create({
         model: "gemini-2.0-flash",

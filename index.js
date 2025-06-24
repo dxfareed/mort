@@ -6,6 +6,9 @@ import { getFirestore, collection, addDoc, doc, setDoc, updateDoc, getDoc, query
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { PrivyClient } from '@privy-io/server-auth';
+import { createViemAccount } from '@privy-io/server-auth/viem';
+import { createWalletClient, http, parseEther, formatEther } from 'viem';
+import { avalancheFuji } from 'viem/chains';
 dotenv.config();
 
 const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
@@ -116,7 +119,7 @@ async function createWalletForUser(username) {
     try {
         console.log("🔗 Creating wallet for user:", username);
 
-        // Create Ethereum wallet using Privy
+        // Create Avax wallet using Privy
         const { id, address, chainType } = await privy.walletApi.create({
             chainType: 'ethereum'
         });
@@ -183,6 +186,24 @@ app.post("/webhook", async (req, res) => {
                 await handleUserSelection(userPhoneNumber, "/wallet", user);
                 return res.sendStatus(200);
             }
+
+            if (buttonId === "send_crypto") {
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await handleSendCrypto(userPhoneNumber, user);
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "receive_crypto") {
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await handleReceiveCrypto(userPhoneNumber, user);
+                return res.sendStatus(200);
+            }
+
+            if (buttonId === "view_balance") {
+                const user = await getUserFromDatabase(userPhoneNumber);
+                await handleViewBalance(userPhoneNumber, user);
+                return res.sendStatus(200);
+            }
         }
 
         // Handle text messages
@@ -203,14 +224,25 @@ app.post("/webhook", async (req, res) => {
                 // Check for special commands first
                 if (userText === "/games" || userText === "/wallet") {
                     await handleUserSelection(userPhoneNumber, userText, existingUser);
+                } else if (userText.toLowerCase().startsWith("send ") && userText.includes(" to ")) {
+                    // Handle send crypto transaction
+                    await handleTransactionInput(userPhoneNumber, userText, existingUser);
                 } else {
-                    // Send welcome back message for first interaction
-                    if (!userStates.has(userPhoneNumber)) {
-                        await sendWelcomeBackMessage(userPhoneNumber, existingUser);
+                    // Check if user is in transaction state
+                    const userState = userStates.get(userPhoneNumber);
+                    if (userState && userState.type === 'awaiting_transaction') {
+                        await handleTransactionInput(userPhoneNumber, userText, existingUser);
+                    } else if (userState && userState.type === 'awaiting_pin_for_transaction') {
+                        await handlePinForTransaction(userPhoneNumber, userText, userState);
                     } else {
-                        // Normal AI conversation
-                        const reply = await generateAIResponse(userPhoneNumber, userText);
-                        await sendMessage(userPhoneNumber, reply);
+                        // Send welcome back message for first interaction
+                        if (!userStates.has(userPhoneNumber)) {
+                            await sendWelcomeBackMessage(userPhoneNumber, existingUser);
+                        } else {
+                            // Normal AI conversation
+                            const reply = await generateAIResponse(userPhoneNumber, userText);
+                            await sendMessage(userPhoneNumber, reply);
+                        }
                     }
                 }
             }
@@ -448,7 +480,7 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
                 walletId: walletData.walletId,
                 chainType: walletData.chainType,
                 balance: {
-                    ETH: "0"
+                    AVAX: "0"
                 },
                 lastBalanceUpdate: now
             },
@@ -467,7 +499,7 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
             // Clear registration state
             registrationStates.delete(userPhoneNumber);
 
-            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n✅ Email: ${state.email}\n✅ Security PIN: Set\n💰 Wallet Address: ${walletData.address}\n\nWelcome to Mort! Your secure Ethereum wallet has been created and you can now start playing games and managing your crypto.`);
+            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n✅ Email: ${state.email}\n✅ Security PIN: Set\n💰 Wallet Address: ${walletData.address}\n\nWelcome to Mort! Your secure Avax wallet has been created and you can now start playing games and managing your crypto.`);
 
             // Send welcome options
             setTimeout(async () => {
@@ -487,27 +519,270 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
     }
 }
 
+// ========== Wallet Menu ==========
+async function sendWalletMenu(to, user) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+                "Content-Type": "application/json",
+            },
+            data: {
+                messaging_product: "whatsapp",
+                to,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: {
+                        type: "text",
+                        text: `💰 ${user.username}'s Wallet`
+                    },
+                    body: {
+                        text: `Your Wallet Address:\n${user.wallet.primaryAddress}\n\nWhat would you like to do?`
+                    },
+                    footer: {
+                        text: "Avalanche Fuji Network"
+                    },
+                    action: {
+                        buttons: [
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "send_crypto",
+                                    title: "💸 Send Crypto"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "receive_crypto",
+                                    title: "📥 Receive Crypto"
+                                }
+                            },
+                            {
+                                type: "reply",
+                                reply: {
+                                    id: "view_balance",
+                                    title: "📊 View Balance"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+        });
+        console.log("✅ Wallet menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending wallet menu:", error);
+        await sendMessage(to, `💰 Welcome to Wallet, ${user.username}!\n\nType:\n/send - Send crypto\n/receive - Receive crypto\n/balance - View balance`);
+    }
+}
+
 // ========== Handle User Selection ==========
 async function handleUserSelection(userPhoneNumber, selection, user) {
-    let response = "";
-
     if (selection === "/games") {
-        response = `🎮 Welcome to Games, ${user.username}!\n\nHere you can:\n• Play interactive games\n• Check game statistics\n• Compete with friends\n• Earn crypto rewards\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nWhat would you like to do? Just ask me anything about games!`;
+        const response = `🎮 Welcome to Games, ${user.username}!\n\nHere you can:\n• Play interactive games\n• Check game statistics\n• Compete with friends\n• Earn crypto rewards\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nWhat would you like to do? Just ask me anything about games!`;
+        await sendMessage(userPhoneNumber, response);
+
+        // Initialize AI conversation for this user after selection
+        initializeUserChat(userPhoneNumber, selection, user);
     } else if (selection === "/wallet") {
-        response = `💰 Welcome to Wallet, ${user.username}!\n\nYour Wallet:\n• Address: ${user.wallet.primaryAddress}\n• ETH Balance: ${user.wallet.balance.ETH}\n• Total Transactions: ${user.stats.transactionCount}\n\nYou can:\n• Check your balance\n• View transaction history\n• Send/receive payments\n• Manage your account\n\nWhat would you like to do with your wallet?`;
+        // Send wallet menu with interactive buttons
+        await sendWalletMenu(userPhoneNumber, user);
     }
+}
 
-    await sendMessage(userPhoneNumber, response);
+// ========== Wallet Functions ==========
+async function handleReceiveCrypto(userPhoneNumber, user) {
+    // First send just the wallet address
+    await sendMessage(userPhoneNumber, user.wallet.primaryAddress);
 
-    // Initialize AI conversation for this user after selection
-    initializeUserChat(userPhoneNumber, selection, user);
+    // Then send the instructions
+    await sendMessage(userPhoneNumber, `📥 Receive Crypto\n\nSend 🔺 AVAX to this address on the Avalanche Fuji network.\n\n🔺 Only send AVAX on Avalanche Fuji network to this address!`);
+}
+
+async function handleViewBalance(userPhoneNumber, user) {
+    try {
+        await sendMessage(userPhoneNumber, "📊 Checking your balance...");
+
+        // Get balance using Privy API
+        const balance = await getWalletBalance(user.wallet.walletId);
+
+        if (balance && balance.balances && balance.balances.length > 0) {
+            const avaxBalance = balance.balances.find(b => b.asset === 'eth' && b.chain === 'avalanche-fuji');
+
+            if (avaxBalance) {
+                const balanceMessage = `💰 Your Wallet Balance\n\n🔺 AVAX: ${avaxBalance.display_values.eth} AVAX\n💲 USD Value: $${avaxBalance.display_values.usd}\n\nNetwork: Avalanche Fuji`;
+                await sendMessage(userPhoneNumber, balanceMessage);
+            } else {
+                await sendMessage(userPhoneNumber, `💰 Your Wallet Balance\n\n🔺 AVAX: 0 AVAX\n💲 USD Value: $0.00\n\nNetwork: Avalanche Fuji`);
+            }
+        } else {
+            await sendMessage(userPhoneNumber, `💰 Your Wallet Balance\n\n🔺 AVAX: 0 AVAX\n💲 USD Value: $0.00\n\nNetwork: Avalanche Fuji`);
+        }
+    } catch (error) {
+        console.error("❌ Error fetching balance:", error);
+        await sendMessage(userPhoneNumber, "❌ Sorry, I couldn't fetch your balance right now. Please try again later.");
+    }
+}
+
+async function handleSendCrypto(userPhoneNumber, user) {
+    await sendMessage(userPhoneNumber, "💸 Send Crypto\n\nPlease provide the following information:\n\n1️⃣ Recipient address\n2️⃣ Amount in AVAX\n\nExample: Send 0.01 AVAX to 0x742d35Cc6634C0532925a3b844Bc454e4438f44e\n\nPlease enter in this format: 'send [amount] to [address]'");
+
+    // Set user state for transaction
+    userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
+}
+
+async function getWalletBalance(walletId) {
+    try {
+        const options = {
+            method: 'GET',
+            headers: {
+                'privy-app-id': PRIVY_APP_ID,
+                'Authorization': `Basic ${Buffer.from(`${PRIVY_APP_ID}:${PRIVY_APP_SECRET}`).toString('base64')}`
+            }
+        };
+
+        const response = await fetch(`https://api.privy.io/v1/wallets/${walletId}/balance`, options);
+        return await response.json();
+    } catch (error) {
+        console.error("❌ Error fetching wallet balance:", error);
+        throw error;
+    }
+}
+
+async function sendTransaction(user, toAddress, amount) {
+    try {
+        // Create a viem account instance for the wallet
+        const account = await createViemAccount({
+            walletId: user.wallet.walletId,
+            address: user.wallet.primaryAddress,
+            privy
+        });
+
+        // Create wallet client
+        const client = createWalletClient({
+            account,
+            chain: avalancheFuji,
+            transport: http()
+        });
+
+        // Send transaction
+        const hash = await client.sendTransaction({
+            to: toAddress,
+            value: parseEther(amount)
+        });
+
+        return hash;
+    } catch (error) {
+        console.error("❌ Error sending transaction:", error);
+        throw error;
+    }
+}
+
+async function handleTransactionInput(userPhoneNumber, userText, user) {
+    try {
+        // Parse the transaction input
+        // Expected format: "send [amount] to [address]"
+        const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40})/i;
+        const match = userText.match(regex);
+
+        if (!match) {
+            await sendMessage(userPhoneNumber, "❌ Invalid format. Please use: 'send [amount] to [address]'\n\nExample: send 0.01 to 0x742d35Cc6634C0532925a3b844Bc454e4438f44e");
+            return;
+        }
+
+        const amount = match[1];
+        const toAddress = match[2];
+
+        // Validate amount
+        if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+            await sendMessage(userPhoneNumber, "❌ Invalid amount. Please enter a valid number greater than 0.");
+            return;
+        }
+
+        // Validate address format
+        if (!/^0x[a-fA-F0-9]{40}$/.test(toAddress)) {
+            await sendMessage(userPhoneNumber, "❌ Invalid address format. Please enter a valid Ethereum address starting with 0x.");
+            return;
+        }
+
+        // Ask for PIN confirmation
+        await sendMessage(userPhoneNumber, `🔐 Transaction Confirmation\n\n💸 Amount: ${amount} AVAX\n📧 To: ${toAddress}\n⛓️ Network: Avalanche Fuji\n\nPlease enter your 4-6 digit PIN to confirm this transaction:`);
+
+        // Set user state for PIN confirmation
+        userStates.set(userPhoneNumber, {
+            type: 'awaiting_pin_for_transaction',
+            user: user,
+            transaction: {
+                amount: amount,
+                toAddress: toAddress
+            }
+        });
+
+    } catch (error) {
+        console.error("❌ Error handling transaction input:", error);
+        await sendMessage(userPhoneNumber, "❌ Sorry, there was an error processing your transaction. Please try again.");
+        userStates.delete(userPhoneNumber);
+    }
+}
+
+async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
+    try {
+        const { user, transaction } = userState;
+
+        // Validate PIN format
+        if (!/^\d{4,6}$/.test(enteredPin)) {
+            await sendMessage(userPhoneNumber, "❌ PIN must be 4-6 digits only. Please try again:");
+            return;
+        }
+
+        // Verify PIN against stored hash
+        const isValidPin = await bcrypt.compare(enteredPin, user.security.hashedPin);
+
+        if (!isValidPin) {
+            await sendMessage(userPhoneNumber, "❌ Incorrect PIN. Transaction cancelled for security.");
+            userStates.delete(userPhoneNumber);
+            return;
+        }
+
+        // PIN is correct, process the transaction
+        await sendMessage(userPhoneNumber, "✅ PIN verified. Processing transaction...");
+
+        try {
+            const txHash = await sendTransaction(user, transaction.toAddress, transaction.amount);
+
+            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nYour transaction is being processed on the blockchain.`);
+
+            // Update user transaction count
+            const userRef = doc(db, 'users', userPhoneNumber);
+            await updateDoc(userRef, {
+                'stats.transactionCount': user.stats.transactionCount + 1,
+                lastSeen: serverTimestamp()
+            });
+
+        } catch (txError) {
+            console.error("❌ Transaction failed:", txError);
+            await sendMessage(userPhoneNumber, "❌ Transaction failed. This could be due to insufficient balance, network issues, or invalid recipient address. Please check your balance and try again.");
+        }
+
+        // Clear user state
+        userStates.delete(userPhoneNumber);
+
+    } catch (error) {
+        console.error("❌ Error handling PIN for transaction:", error);
+        await sendMessage(userPhoneNumber, "❌ Sorry, there was an error processing your PIN. Please try again later.");
+        userStates.delete(userPhoneNumber);
+    }
 }
 
 // ========== Initialize User Chat Session ==========
 function initializeUserChat(userPhoneNumber, selectedOption, user) {
     const contextInstruction = selectedOption === "/games"
         ? `You are a helpful gaming assistant for ${user.username}. Help users with game-related queries, provide gaming tips, and make the experience fun and engaging. The user has played ${user.stats.gamesPlayed} games and earned ${user.stats.totalEarned} tokens so far.`
-        : `You are a helpful wallet and financial assistant for ${user.username}. Help users with wallet operations, transaction queries, and provide financial guidance while being secure and professional. ETH ${user.wallet.balance.ETH}.`;
+        : `You are a helpful wallet and financial assistant for ${user.username}. Help users with wallet operations, transaction queries, and provide financial guidance while being secure and professional. 🔺 Avax ${user.wallet.balance.AVAX}.`;
 
     const userChat = ai.chats.create({
         model: "gemini-2.0-flash",
@@ -591,8 +866,6 @@ async function sendMessage(to, body) {
         console.error("❌ Error sending message:", error.response?.data || error);
     }
 }
-
-
 
 app.listen(8000, () => {
     console.log("🚀 Web3 ChatBot Server running on port 8000");

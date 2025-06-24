@@ -7,7 +7,7 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { PrivyClient } from '@privy-io/server-auth';
 import { createViemAccount } from '@privy-io/server-auth/viem';
-import { createWalletClient, http, parseEther, formatEther } from 'viem';
+import { createPublicClient, createWalletClient, http, parseEther, formatEther } from 'viem';
 import { avalancheFuji } from 'viem/chains';
 dotenv.config();
 
@@ -608,7 +608,7 @@ async function handleViewBalance(userPhoneNumber, user) {
         await sendMessage(userPhoneNumber, "📊 Checking your balance...");
 
         // Get balance using Privy API
-        const balance = await getWalletBalance(user.wallet.walletId);
+        const balance = await getWalletBalance(user.wallet.primaryAddress);
 
         if (balance && balance.balances && balance.balances.length > 0) {
             const avaxBalance = balance.balances.find(b => b.asset === 'eth' && b.chain === 'avalanche-fuji');
@@ -635,23 +635,31 @@ async function handleSendCrypto(userPhoneNumber, user) {
     userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
 }
 
-async function getWalletBalance(walletId) {
+async function getWalletBalance(w) {
     try {
-        const options = {
-            method: 'GET',
-            headers: {
-                'privy-app-id': PRIVY_APP_ID,
-                'Authorization': `Basic ${Buffer.from(`${PRIVY_APP_ID}:${PRIVY_APP_SECRET}`).toString('base64')}`
-            }
-        };
+        const publicClient = createPublicClient({
+            chain: avalancheFuji,
+            transport: http()
+        });
 
-        const response = await fetch(`https://api.privy.io/v1/wallets/${walletId}/balance`, options);
-        return await response.json();
+        const balance = await publicClient.getBalance({
+            address: w,
+        });
+
+        return {
+            balances: [{
+                asset: 'eth',
+                chain: 'avalanche-fuji',
+                display_values: {
+                    eth: formatEther(balance),
+                    usd:"ftch later from gecko / chainlink",
+                }
+            }]
+        };
     } catch (error) {
         console.error("❌ Error fetching wallet balance:", error);
         throw error;
-    }
-}
+    }}
 
 async function sendTransaction(user, toAddress, amount) {
     try {

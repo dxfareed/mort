@@ -12,7 +12,8 @@ import { avalancheFuji } from 'viem/chains';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
-const flipGameAbi = require('./abi/flip.json');
+const flipGameAbi = require('./abi.json');
+const rpsGameAbi = require('./rpsAbi.json');
 dotenv.config();
 
 const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
@@ -22,7 +23,8 @@ const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
 const PORT = process.env.PORT;
 const FLIP_GAME_CONTRACT_ADDRESS = '0x06262a1934E1a8fDD5d4bc1D9EcF5D141b1Cb36F';
-const WSS_RPC_URL=process.env.AVAX_RPC_WSS_URL
+const RPS_GAME_CONTRACT_ADDRESS = '0xF0B8EA32c00Ab17C7B0035bD38f53a2A6324207E';
+const WSS_RPC_URL = process.env.RPC_URL;
 
 const firebaseConfig = {
     apiKey: process.env.FIREBASE_API_KEY,
@@ -144,7 +146,6 @@ app.get("/webhook", (req, res) => {
         res.sendStatus(403);
     }
 });
-
 app.post("/webhook", async (req, res) => {
     try {
         const { entry } = req.body;
@@ -222,7 +223,14 @@ async function handleStatefulInput(userPhoneNumber, userText, buttonId, userStat
         await handleFlipAmountSelection(userPhoneNumber, amount, userState);
     } else if (userState.type === 'awaiting_pin_for_flip' && userText) {
         await handlePinForFlip(userPhoneNumber, userText, userState);
-    } else {
+    } 
+    else if (userState.type === 'awaiting_rps_amount' && buttonId?.startsWith('rps_amount_')) {
+        const amount = buttonId.split('_')[2];
+        await handleRpsAmountSelection(userPhoneNumber, amount, userState);
+    } else if (userState.type === 'awaiting_pin_for_rps' && userText) {
+        await handlePinForRps(userPhoneNumber, userText, userState);
+    }
+    else {
         await sendMessage(userPhoneNumber, "Please complete the current action or press Cancel.");
     }
 }
@@ -254,9 +262,251 @@ async function handleButtonSelection(userPhoneNumber, buttonId, user) {
             await handleFlipChoice(userPhoneNumber, user, 1);
             break;
         case "rock_paper_scissors":
+            await handleStartRpsGame(userPhoneNumber, user);
+            break;
+        case "rps_choice_rock":
+            await handleRpsChoice(userPhoneNumber, user, 0); 
+            break;
+        case "rps_choice_paper":
+            await handleRpsChoice(userPhoneNumber, user, 1); 
+            break;
+        case "rps_choice_scissor":
+            await handleRpsChoice(userPhoneNumber, user, 2); 
+            break;
         case "guess_number":
             await sendMessage(userPhoneNumber, "This feature is coming soon!");
             break;
+    }
+}
+
+async function sendGameAmountMenu(to, choiceText, gamePrefix) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp",
+                to,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header: { type: "text", text: `You Chose ${choiceText}` },
+                    body: { text: "How much AVAX would you like to bet? 🔺" },
+                    footer: { text: "Select a bet amount" },
+                    action: {
+                        buttons: [
+                            { type: "reply", reply: { id: `${gamePrefix}_amount_0.001`, title: "0.001 AVAX" } },
+                            { type: "reply", reply: { id: `${gamePrefix}_amount_0.01`, title: "0.01 AVAX" } },
+                            { type: "reply", reply: { id: `${gamePrefix}_amount_0.1`, title: "0.1 AVAX" } }
+                        ]
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error(`❌ Error sending ${gamePrefix} amount menu:`, error.response?.data || error.message);
+        await sendMessage(to, "Sorry, there was an error. Please try starting the game again.");
+        userStates.delete(to);
+    }
+}
+
+async function startBlockchainListener() {
+    console.log("👂 Starting blockchain event listener with WebSocket...");
+    const publicClient = createPublicClient({
+        chain: avalancheFuji,
+        transport: webSocket(WSS_RPC_URL)
+    });
+
+    publicClient.watchContractEvent({
+        address: FLIP_GAME_CONTRACT_ADDRESS, abi: flipGameAbi, eventName: 'FlipResolved',
+        onLogs: async (logs) => {
+            for (const log of logs) {
+                try {
+                    const { requestId, won, payout = 0n } = log.args;
+                    const flipDocRef = doc(db, 'flips', requestId.toString());
+                    const flipDocSnap = await getDoc(flipDocRef);
+
+                    if (!flipDocSnap.exists() || flipDocSnap.data().status !== 'pending') continue;
+
+                    const flipData = flipDocSnap.data();
+                    const userDocRef = doc(db, 'users', flipData.whatsappId);
+                    const userDocSnap = await getDoc(userDocRef);
+                    if (!userDocSnap.exists()) continue;
+
+                    const userData = userDocSnap.data();
+                    const payoutFormatted = formatEther(payout);
+                    
+                    const userChoice = flipData.choice;
+                    const userChoiceStr = userChoice === 0 ? 'Heads' : 'Tails';
+                    const actualResult = won ? userChoice : (1 - userChoice);
+                    const resultStr = actualResult === 0 ? '🗿 Heads' : '🪙 Tails';
+
+                    let messageBody;
+                    if (won) {
+                        messageBody = `The coin landed on *${resultStr}*!\n\nYou chose *${userChoiceStr}* and WON! 🎉\n\nYou've received ${payoutFormatted} AVAX.`;
+                    } else {
+                        messageBody = `The coin landed on *${resultStr}*.\n\nYou chose *${userChoiceStr}* and lost.\nBetter luck next time!`;
+                    }
+                    
+                    await sendMessage(flipData.whatsappId, messageBody);
+                    await updateDoc(flipDocRef, { status: 'resolved', result: won ? 'won' : 'lost', payoutAmount: payoutFormatted, resolvedTimestamp: serverTimestamp() });
+                    
+                    const userStatsUpdate = { 'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1 };
+                    if (won) {
+                        userStatsUpdate['stats.totalEarned'] = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(payoutFormatted)).toString();
+                    }
+                    await updateDoc(userDocRef, userStatsUpdate);
+
+                    setTimeout(() => sendPostGameMenu(flipData.whatsappId), 2000);
+
+                } catch(e) { console.error("Error processing a resolved flip log:", e); }
+            }
+        },
+        onError: (error) => console.error("Flip Game listener error:", error)
+    });
+
+    publicClient.watchContractEvent({
+        address: RPS_GAME_CONTRACT_ADDRESS, abi: rpsGameAbi, eventName: 'GameResult',
+        onLogs: async (logs) => {
+            for (const log of logs) {
+                try {
+                    const { requestId, outcome, playerChoice, computerChoice, prizeAmount = 0n } = log.args;
+                    const rpsDocRef = doc(db, 'rps_games', requestId.toString());
+                    const rpsDocSnap = await getDoc(rpsDocRef);
+
+                    if (!rpsDocSnap.exists() || rpsDocSnap.data().status !== 'pending') continue;
+
+                    const rpsData = rpsDocSnap.data();
+                    const userDocRef = doc(db, 'users', rpsData.whatsappId);
+                    const userDocSnap = await getDoc(userDocRef);
+                    if (!userDocSnap.exists()) continue;
+                    
+                    const userData = userDocSnap.data();
+                    const prizeFormatted = formatEther(prizeAmount);
+
+                    const choiceMap = ['✊ Rock', '✋ Paper', '✌️ Scissor'];
+                    const outcomeMap = ['You Win! 🎉', 'You Lose 😔', 'It\'s a Draw! 🤝'];
+
+                    const messageBody = `*${outcomeMap[outcome]}*\n\nYou chose ${choiceMap[playerChoice]}\nComputer chose ${choiceMap[computerChoice]}\n\n${outcome === 0 ? `You won ${prizeFormatted} AVAX!` : outcome === 2 ? `Your bet of ${rpsData.betAmount} AVAX was returned.` : 'Better luck next time!'}`;
+                    
+                    await sendMessage(rpsData.whatsappId, messageBody);
+
+                    await updateDoc(rpsDocRef, { status: 'resolved', result: outcomeMap[outcome], prizeAmount: prizeFormatted, resolvedTimestamp: serverTimestamp() });
+
+                    const userStatsUpdate = { 'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1 };
+                    if (outcome === 0) { 
+                        userStatsUpdate['stats.totalEarned'] = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(prizeFormatted)).toString();
+                    }
+                    await updateDoc(userDocRef, userStatsUpdate);
+
+                    setTimeout(() => sendPostGameMenu(rpsData.whatsappId), 2000);
+
+                } catch (e) { console.error("Error processing a resolved RPS log:", e); }
+            }
+        },
+        onError: (error) => console.error("RPS Game listener error:", error)
+    });
+}
+
+async function handleStartRpsGame(to, user) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp", to, type: "interactive",
+                interactive: {
+                    type: "button", header: { type: "text", text: "✊ Rock Paper Scissor" },
+                    body: { text: "Make your choice to begin!" },
+                    action: { buttons: [
+                        { type: "reply", reply: { id: "rps_choice_rock", title: "✊ Rock" } }, 
+                        { type: "reply", reply: { id: "rps_choice_paper", title: "✋ Paper" } },
+                        { type: "reply", reply: { id: "rps_choice_scissor", title: "✌️ Scissor" } }
+                    ] }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("❌ Error sending RPS start message:", error.response?.data || error.message);
+    }
+}
+
+async function handleRpsChoice(phone, user, choice) {
+    userStates.set(phone, { type: 'awaiting_rps_amount', user, choice });
+    const choiceMap = ['✊ Rock', '✋ Paper', '✌️ Scissor'];
+    await sendGameAmountMenu(phone, choiceMap[choice], 'rps');
+}
+
+async function handleRpsAmountSelection(phone, amount, state) {
+    const { user, choice } = state;
+    const choiceMap = ['Rock', 'Paper', 'Scissor'];
+    await sendMessage(phone, `🔐 Confirm Game\n\n🎲 Choice: ${choiceMap[choice]}\n💸 Bet: ${amount} AVAX\n\nEnter your PIN:`);
+    userStates.set(phone, { type: 'awaiting_pin_for_rps', user, rps: { amount, choice } });
+}
+
+async function handlePinForRps(phone, pin, state) {
+    const { user, rps } = state;
+    try {
+        if (!(await bcrypt.compare(pin, user.security.hashedPin))) {
+            userStates.delete(phone);
+            await sendMessage(phone, "❌ Incorrect PIN. Game cancelled.");
+            setTimeout(() => sendGamesMenu(phone, user), 1500);
+            return;
+        }
+        await sendMessage(phone, "✅ PIN verified. Placing your bet...");
+        const result = await executeRpsTransaction(user, rps.choice, rps.amount);
+        if (result.success) {
+            const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
+            await sendMessage(phone, `🎉 Bet placed! We'll notify you of the result.\n\nTransaction Hash:\n${explorerUrl}`);
+        } else {
+            await sendMessage(phone, `❌ Bet failed. ${result.error || "Check balance and try again."}`);
+        }
+    } catch (e) {
+        await sendMessage(phone, "❌ Bet failed due to a network or balance issue.");
+    } finally {
+        userStates.delete(phone);
+    }
+}
+
+async function executeRpsTransaction(user, choice, amount) {
+    try {
+        const account = await createViemAccount({
+            walletId: user.wallet.walletId,
+            address: user.wallet.primaryAddress,
+            privy
+        });
+        const walletClient = createWalletClient({ account, chain: avalancheFuji, transport: http() });
+        const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
+
+        const hash = await walletClient.writeContract({ 
+            address: RPS_GAME_CONTRACT_ADDRESS, 
+            abi: rpsGameAbi, 
+            functionName: 'play', 
+            args: [choice], 
+            value: parseEther(amount) 
+        });
+
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+        for (const log of receipt.logs) {
+            if (log.address.toLowerCase() !== RPS_GAME_CONTRACT_ADDRESS.toLowerCase()) continue;
+            try {
+                const decodedEvent = decodeEventLog({ abi: rpsGameAbi, data: log.data, topics: log.topics });
+                if (decodedEvent.eventName === 'GamePlayed') {
+                    await setDoc(doc(db, 'rps_games', decodedEvent.args.requestId.toString()), {
+                        whatsappId: user.whatsappId, username: user.username, betAmount: amount, choice, status: 'pending', requestTimestamp: serverTimestamp(), txHash: hash
+                    });
+                    return { success: true, hash };
+                }
+            } catch (e) {
+                console.warn("Could not decode a log from the RPS contract:", e.message);
+            }
+        }
+        return { success: false, error: 'Could not confirm RPS request ID on-chain.' };
+    } catch (e) {
+        console.error("RPS TX Error:", e);
+        throw e;
     }
 }
 
@@ -278,7 +528,6 @@ async function fetchAvaxPrice() {
     return 0;
   }
 }
-
 async function handleNewUserFlow(userPhoneNumber, userText, registrationState) {
     if (!userText) {
         await sendMessage(userPhoneNumber, "Please provide the requested information to continue.");
@@ -303,7 +552,6 @@ async function handleNewUserFlow(userPhoneNumber, userText, registrationState) {
             await sendNewUserWelcomeMessage(userPhoneNumber);
     }
 }
-
 async function sendNewUserWelcomeMessage(to) {
     try {
         await axios({
@@ -325,7 +573,6 @@ async function sendNewUserWelcomeMessage(to) {
         console.error("❌ Error sending new user welcome message:", error.response?.data || error.message);
     }
 }
-
 async function sendWelcomeBackMessage(to, user) {
     try {
         await axios({
@@ -347,7 +594,6 @@ async function sendWelcomeBackMessage(to, user) {
         console.error("❌ Error sending welcome back message:", error.response?.data || error.message);
     }
 }
-
 async function handleUsernameInput(userPhoneNumber, username) {
     if (username.length < 3 || username.length > 20 || !/^[a-zA-Z0-9_]+$/.test(username)) {
         await sendMessage(userPhoneNumber, "❌ Invalid username (3-20 chars, letters, numbers, underscores).");
@@ -364,7 +610,6 @@ async function handleUsernameInput(userPhoneNumber, username) {
     registrationStates.set(userPhoneNumber, state);
     await sendMessage(userPhoneNumber, `✅ Great! Username "${username}" is available.\n\nNow, please enter your email address:`);
 }
-
 async function handleEmailInput(userPhoneNumber, email) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         await sendMessage(userPhoneNumber, "❌ Please enter a valid email address:");
@@ -376,7 +621,6 @@ async function handleEmailInput(userPhoneNumber, email) {
     registrationStates.set(userPhoneNumber, state);
     await sendMessage(userPhoneNumber, `✅ Email saved: ${email}\n\n🔐 Now, create a secure 4-6 digit transaction PIN.\nEnter your PIN:`);
 }
-
 async function handlePinInput(userPhoneNumber, pin) {
     if (!/^\d{4,6}$/.test(pin)) {
         await sendMessage(userPhoneNumber, "❌ PIN must be 4-6 digits only. Please try again:");
@@ -388,7 +632,6 @@ async function handlePinInput(userPhoneNumber, pin) {
     registrationStates.set(userPhoneNumber, state);
     await sendMessage(userPhoneNumber, "🔒 Please confirm your PIN by entering it again:");
 }
-
 async function handlePinConfirmation(userPhoneNumber, confirmPin) {
     const state = registrationStates.get(userPhoneNumber);
     if (state.pin !== confirmPin) {
@@ -425,7 +668,6 @@ async function handlePinConfirmation(userPhoneNumber, confirmPin) {
         registrationStates.delete(userPhoneNumber);
     }
 }
-
 async function sendWalletMenu(to, user) {
     try {
         await axios({
@@ -446,7 +688,6 @@ async function sendWalletMenu(to, user) {
         console.error("❌ Error sending wallet menu:", error.response?.data || error.message);
     }
 }
-
 async function sendGamesMenu(to, user) {
     try {
         await axios({
@@ -467,7 +708,6 @@ async function sendGamesMenu(to, user) {
         console.error("❌ Error sending games menu:", error.response?.data || error.message);
     }
 }
-
 async function sendMainMenu(to, user) {
     try {
         const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
@@ -494,7 +734,6 @@ async function sendMainMenu(to, user) {
         console.error("❌ Error sending main menu:", error.response?.data || error.message);
     }
 }
-
 async function sendPostGameMenu(to) {
     try {
         const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
@@ -532,13 +771,11 @@ async function sendPostGameMenu(to) {
         console.error("❌ Error sending post-game menu:", error.response?.data || error.message);
     }
 }
-
 async function handleReceiveCrypto(userPhoneNumber, user) {
     await sendMessage(userPhoneNumber, user.wallet.primaryAddress);
     await sendMessage(userPhoneNumber, `📥 Send 🔺AVAX to this address on the Avalanche Fuji network.`);
     setTimeout(() => sendMainMenu(userPhoneNumber, user), 2000);
 }
-
 async function handleViewBalance(userPhoneNumber, user) {
     try {
         const price = await fetchAvaxPrice();
@@ -553,7 +790,6 @@ async function handleViewBalance(userPhoneNumber, user) {
         await sendMessage(userPhoneNumber, "❌ Sorry, I couldn't fetch your balance right now.");
     }
 }
-
 async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
     const { user, transaction } = userState;
     const isValidPin = await bcrypt.compare(enteredPin, user.security.hashedPin);
@@ -582,80 +818,6 @@ async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
     userStates.delete(userPhoneNumber);
     setTimeout(() => sendMainMenu(userPhoneNumber, user), 2000);
 }
-
-async function startBlockchainListener() {
-    console.log("👂 Starting blockchain event listener with WebSocket...");
-    const publicClient = createPublicClient({
-        chain: avalancheFuji,
-        transport: webSocket(WSS_RPC_URL)
-    });
-
-    publicClient.watchContractEvent({
-        address: FLIP_GAME_CONTRACT_ADDRESS, abi: flipGameAbi, eventName: 'FlipResolved',
-        onLogs: async (logs) => {
-            for (const log of logs) {
-                try {
-                    const { requestId, won, payout = 0n } = log.args;
-                    const requestIdStr = requestId.toString();
-                    const flipDocRef = doc(db, 'flips', requestIdStr);
-                    const flipDocSnap = await getDoc(flipDocRef);
-
-                    if (!flipDocSnap.exists() || flipDocSnap.data().status !== 'pending') continue;
-
-                    const flipData = flipDocSnap.data();
-                    const userDocRef = doc(db, 'users', flipData.whatsappId);
-                    const userDocSnap = await getDoc(userDocRef);
-                    if (!userDocSnap.exists()) continue;
-
-                    const userData = userDocSnap.data();
-                    const payoutFormatted = formatEther(payout);
-                    
-                    const userChoice = flipData.choice;
-                    const userChoiceStr = userChoice === 0 ? 'Heads' : 'Tails';
-                    
-                    const actualResult = won ? userChoice : (1 - userChoice);
-                    const resultStr = actualResult === 0 ? '🗿 Heads' : '🪙 Tails';
-
-                    let messageBody;
-                    if (won) {
-                        messageBody = `The coin landed on *${resultStr}*!\n\nYou chose *${userChoiceStr}* and WON! 🎉\n\nYou've received ${payoutFormatted} AVAX.`;
-                    } else {
-                        messageBody = `The coin landed on *${resultStr}*.\n\nYou chose *${userChoiceStr}* and lost.\nBetter luck next time!`;
-                    }
-                    
-                    await sendMessage(flipData.whatsappId, messageBody);
-
-                    await updateDoc(flipDocRef, { 
-                        status: 'resolved', 
-                        result: won ? 'won' : 'lost', 
-                        payoutAmount: payoutFormatted, 
-                        resolvedTimestamp: serverTimestamp() 
-                    });
-                    
-                    const userStatsUpdate = {
-                        'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1
-                    };
-
-                    if (won) {
-                        const newTotalEarned = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(payoutFormatted)).toString();
-                        userStatsUpdate['stats.totalEarned'] = newTotalEarned;
-                    }
-
-                    await updateDoc(userDocRef, userStatsUpdate);
-
-                    setTimeout(() => {
-                        sendPostGameMenu(flipData.whatsappId);
-                    }, 2000);
-
-                } catch(e) { 
-                    console.error("Error processing a resolved flip log:", e); 
-                }
-            }
-        },
-        onError: (error) => console.error("Blockchain listener error:", error)
-    });
-}
-
 async function handleSendCrypto(userPhoneNumber, user) {
     userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
     
@@ -684,7 +846,6 @@ async function handleSendCrypto(userPhoneNumber, user) {
         await sendMessage(userPhoneNumber, "💸 Send Crypto\nPlease enter in this format: 'send [amount] to [address]'\n\n(Reply with 'cancel' to exit)");
     }
 }
-
 async function handleTransactionInput(userPhoneNumber, userText, user) {
     const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40})/i;
     const match = userText.match(regex);
@@ -721,7 +882,6 @@ async function handleTransactionInput(userPhoneNumber, userText, user) {
         await sendMessage(userPhoneNumber, `🔐 Confirm Transaction\n💸 Amount: ${amount} AVAX\nTo: ${toAddress}\n\nEnter your PIN:`);
     }
 }
-
 async function handleStartFlipGame(to, user) {
     try {
         await axios({
@@ -740,51 +900,16 @@ async function handleStartFlipGame(to, user) {
         console.error("❌ Error sending flip game start message:", error.response?.data || error.message);
     }
 }
-
-async function sendFlipAmountMenu(to, choice) {
-    const choiceText = choice === 0 ? "Heads" : "Tails";
-    try {
-        await axios({
-            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
-            method: "POST",
-            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
-            data: {
-                messaging_product: "whatsapp",
-                to,
-                type: "interactive",
-                interactive: {
-                    type: "button",
-                    header: { type: "text", text: `You Chose ${choiceText}` },
-                    body: { text: "How much AVAX would you like to bet? 🔺" },
-                    footer: { text: "Select a bet amount" },
-                    action: {
-                        buttons: [
-                            { type: "reply", reply: { id: "flip_amount_0.001", title: "0.001 AVAX" } },
-                            { type: "reply", reply: { id: "flip_amount_0.01", title: "0.01 AVAX" } },
-                            { type: "reply", reply: { id: "flip_amount_0.1", title: "0.1 AVAX" } }
-                        ]
-                    }
-                }
-            }
-        });
-    } catch (error) {
-        console.error("❌ Error sending flip amount menu:", error.response?.data || error.message);
-        await sendMessage(to, "Sorry, there was an error. Please try starting the game again.");
-        userStates.delete(to);
-    }
-}
-
 async function handleFlipChoice(phone, user, choice) {
     userStates.set(phone, { type: 'awaiting_flip_amount', user, choice });
-    await sendFlipAmountMenu(phone, choice);
+    const choiceText = choice === 0 ? "Heads" : "Tails";
+    await sendGameAmountMenu(phone, choiceText, 'flip');
 }
-
 async function handleFlipAmountSelection(phone, amount, state) {
     const { user, choice } = state;
     await sendMessage(phone, `🔐 Confirm Flip\n\n🎲 Choice: ${choice === 0 ? 'Heads' : 'Tails'}\n💸 Bet: ${amount} AVAX\n\nEnter your PIN:`);
     userStates.set(phone, { type: 'awaiting_pin_for_flip', user, flip: { amount, choice } });
 }
-
 async function handlePinForFlip(phone, pin, state) {
     const { user, flip } = state;
     try {
@@ -796,20 +921,18 @@ async function handlePinForFlip(phone, pin, state) {
         }
         await sendMessage(phone, "✅ PIN verified. Placing your bet...");
         const result = await executeFlipTransaction(user, flip.choice, flip.amount);
-        const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
         if (result.success) {
+            const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
             await sendMessage(phone, `🎉 Bet placed! We'll notify you of the result.\n\nTransaction Hash:\n${explorerUrl}`);
         } else {
             await sendMessage(phone, `❌ Bet failed. ${result.error || "Check balance and try again."}`);
         }
     } catch (e) {
         await sendMessage(phone, "❌ Bet failed due to a network or balance issue.");
-        console.error("Error during flip transaction execution:", e.message);
     } finally {
         userStates.delete(phone);
     }
 }
-
 async function executeFlipTransaction(user, choice, amount) {
     try {
         const account = await createViemAccount({
@@ -845,7 +968,6 @@ async function executeFlipTransaction(user, choice, amount) {
         throw e;
     }
 }
-
 async function sendMessage(to, body) {
     try {
         await axios({

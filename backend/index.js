@@ -7,8 +7,12 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { PrivyClient } from '@privy-io/server-auth';
 import { createViemAccount } from '@privy-io/server-auth/viem';
-import { createPublicClient, createWalletClient, http, parseEther, formatEther } from 'viem';
+import { createPublicClient, createWalletClient, http, webSocket, parseEther, formatEther, decodeEventLog } from 'viem';
 import { avalancheFuji } from 'viem/chains';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+const flipGameAbi = require('./abi/flip.json');
 dotenv.config();
 
 const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
@@ -17,8 +21,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
 const PORT = process.env.PORT;
+const FLIP_GAME_CONTRACT_ADDRESS = '0x06262a1934E1a8fDD5d4bc1D9EcF5D141b1Cb36F';
+const WSS_RPC_URL=process.env.AVAX_RPC_WSS_URL
 
-// Firebase Configuration
 const firebaseConfig = {
     apiKey: process.env.FIREBASE_API_KEY,
     authDomain: process.env.FIREBASE_AUTH_DOMAIN,
@@ -38,10 +43,8 @@ app.use(express.json());
 
 const userStates = new Map();
 const registrationStates = new Map();
-const CONVERSATION_TTL = 30 * 60 * 1000;
 const SALT_ROUNDS = 12;
 
-// Registration states
 const REGISTRATION_STEPS = {
     AWAITING_USERNAME: 'awaiting_username',
     AWAITING_EMAIL: 'awaiting_email',
@@ -49,15 +52,12 @@ const REGISTRATION_STEPS = {
     CONFIRMING_PIN: 'confirming_pin'
 };
 
-// Initialize Gemini AI
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// ========== Database Helper Functions ==========
 async function getUserFromDatabase(whatsappId) {
     try {
         const userRef = doc(db, 'users', whatsappId);
         const userSnap = await getDoc(userRef);
-
         if (userSnap.exists()) {
             return { id: userSnap.id, ...userSnap.data() };
         }
@@ -72,11 +72,8 @@ async function createUserInDatabase(userData) {
     try {
         const userRef = doc(db, 'users', userData.whatsappId);
         await setDoc(userRef, userData);
-
-        // Also create username mapping
         const usernameRef = doc(db, 'usernames', userData.username);
         await setDoc(usernameRef, { whatsappId: userData.whatsappId });
-
         console.log("✅ User created successfully:", userData.whatsappId);
         return true;
     } catch (error) {
@@ -92,7 +89,7 @@ async function checkUsernameExists(username) {
         return usernameSnap.exists();
     } catch (error) {
         console.error("❌ Error checking username:", error);
-        return true; // Return true to be safe
+        return true;
     }
 }
 
@@ -119,17 +116,13 @@ async function updateUserLastSeen(whatsappId) {
 async function createWalletForUser(username) {
     try {
         console.log("🔗 Creating wallet for user:", username);
-
-        // Create Avax wallet using Privy
         const { id, address, chainType } = await privy.walletApi.create({
             chainType: 'ethereum'
         });
-
         console.log("✅ Wallet created successfully:");
         console.log("   - Wallet ID:", id);
         console.log("   - Address:", address);
         console.log("   - Chain Type:", chainType);
-
         return {
             walletId: id,
             address: address,
@@ -141,12 +134,10 @@ async function createWalletForUser(username) {
     }
 }
 
-// ========== WhatsApp Webhook Setup ==========
 app.get("/webhook", (req, res) => {
     const mode = req.query["hub.mode"];
     const challenge = req.query["hub.challenge"];
     const token = req.query["hub.verify_token"];
-
     if (mode && token === WEBHOOK_VERIFY_TOKEN) {
         res.status(200).send(challenge);
     } else {
@@ -154,141 +145,146 @@ app.get("/webhook", (req, res) => {
     }
 });
 
-// ========== WhatsApp Incoming Message Handler ==========
 app.post("/webhook", async (req, res) => {
     try {
         const { entry } = req.body;
-        if (!entry?.[0]?.changes?.[0]?.value?.messages) return res.sendStatus(400);
+        if (!entry?.[0]?.changes?.[0]?.value?.messages) {
+            return res.sendStatus(200);
+        }
 
         const message = entry[0].changes[0].value.messages[0];
         const userPhoneNumber = message.from;
-
-        // Handle button responses first
-        if (message.interactive?.button_reply?.id) {
-            const buttonId = message.interactive.button_reply.id;
-
-            if (buttonId === "create_account") {
-                // Start registration process
-                registrationStates.set(userPhoneNumber, {
-                    step: REGISTRATION_STEPS.AWAITING_USERNAME
-                });
-                await sendMessage(userPhoneNumber, "🔐 Let's create your account!\n\nFirst, choose a unique username (3-20 characters, letters, numbers, and underscores only):");
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "games_option") {
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await handleUserSelection(userPhoneNumber, "/games", user);
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "wallet_option") {
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await handleUserSelection(userPhoneNumber, "/wallet", user);
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "send_crypto") {
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await handleSendCrypto(userPhoneNumber, user);
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "receive_crypto") {
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await handleReceiveCrypto(userPhoneNumber, user);
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "view_balance") {
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await handleViewBalance(userPhoneNumber, user);
-                return res.sendStatus(200);
-            }
-
-            // Handle game button clicks
-            if (buttonId === "flip_it") {
-                console.log("🎮 User clicked Flip It game");
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await sendMessage(userPhoneNumber, "🎲 Flip It game - This feature coming soon!");
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "rock_paper_scissors") {
-                console.log("🎮 User clicked Rock Paper Scissors game");
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await sendMessage(userPhoneNumber, "✂️ Rock Paper Scissors game - This feature coming soon!");
-                return res.sendStatus(200);
-            }
-
-            if (buttonId === "guess_number") {
-                console.log("🎮 User clicked Guess the Number game");
-                const user = await getUserFromDatabase(userPhoneNumber);
-                await sendMessage(userPhoneNumber, "🔢 Guess the Number game - This feature coming soon!");
-                return res.sendStatus(200);
-            }
-        }
-
-        // Handle text messages
         const userText = message.text?.body;
-        if (userText) {
-            console.log("📩 User said:", userText);
+        const buttonId = message.interactive?.button_reply?.id;
 
-            // Check if user exists in database
-            const existingUser = await getUserFromDatabase(userPhoneNumber);
-
-            if (!existingUser) {
-                // Handle new user registration flow
-                await handleNewUserFlow(userPhoneNumber, userText);
-            } else {
-                // Handle existing user
-                await updateUserLastSeen(userPhoneNumber);
-
-                // Check for special commands first
-                if (userText === "/games" || userText === "/wallet") {
-                    await handleUserSelection(userPhoneNumber, userText, existingUser);
-                } else if (userText.toLowerCase().startsWith("send ") && userText.includes(" to ")) {
-                    // Handle send crypto transaction
-                    await handleTransactionInput(userPhoneNumber, userText, existingUser);
-                } else {
-                    // Check if user is in transaction state
-                    const userState = userStates.get(userPhoneNumber);
-                    if (userState && userState.type === 'awaiting_transaction') {
-                        await handleTransactionInput(userPhoneNumber, userText, existingUser);
-                    } else if (userState && userState.type === 'awaiting_pin_for_transaction') {
-                        await handlePinForTransaction(userPhoneNumber, userText, userState);
-                    } else {
-                        // Send welcome back message for first interaction
-                        if (!userStates.has(userPhoneNumber)) {
-                            await sendWelcomeBackMessage(userPhoneNumber, existingUser);
-                        } else {
-                            // Normal AI conversation
-                            const reply = await generateAIResponse(userPhoneNumber, userText);
-                            await sendMessage(userPhoneNumber, reply);
-                        }
-                    }
-                }
-            }
+        const registrationState = registrationStates.get(userPhoneNumber);
+        if (registrationState) {
+            await handleNewUserFlow(userPhoneNumber, userText, registrationState);
+            return res.sendStatus(200);
         }
 
+        const userState = userStates.get(userPhoneNumber);
+        if (userState) {
+            await handleStatefulInput(userPhoneNumber, userText, buttonId, userState);
+            return res.sendStatus(200);
+        }
+
+        const user = await getUserFromDatabase(userPhoneNumber);
+
+        if (!user) {
+            if (buttonId === 'create_account') {
+                registrationStates.set(userPhoneNumber, { step: REGISTRATION_STEPS.AWAITING_USERNAME });
+                await sendMessage(userPhoneNumber, "🔐 Let's create your account!\n\nFirst, choose a unique username (3-20 characters, letters, numbers, and underscores only):");
+            } else {
+                await sendNewUserWelcomeMessage(userPhoneNumber);
+            }
+            return res.sendStatus(200);
+        }
+
+        await updateUserLastSeen(userPhoneNumber);
+
+        if (buttonId) {
+            await handleButtonSelection(userPhoneNumber, buttonId, user);
+        } else if (userText) {
+            const lowerCaseText = userText.toLowerCase();
+            if (lowerCaseText === "/games" || lowerCaseText === "games") {
+                await sendGamesMenu(userPhoneNumber, user);
+            } else if (lowerCaseText === "/wallet" || lowerCaseText === "wallet") {
+                await sendWalletMenu(userPhoneNumber, user);
+            } else {
+                await sendWelcomeBackMessage(userPhoneNumber, user);
+            }
+        }
         res.sendStatus(200);
     } catch (error) {
-        console.error("❌ Error handling message:", error);
+        console.error("❌ Error handling webhook:", error);
         res.sendStatus(500);
     }
 });
 
-// ========== New User Registration Flow ==========
-async function handleNewUserFlow(userPhoneNumber, userText) {
-    const registrationState = registrationStates.get(userPhoneNumber);
-
-    if (!registrationState) {
-        // First time user - send welcome message with create account button
-        await sendNewUserWelcomeMessage(userPhoneNumber);
+async function handleStatefulInput(userPhoneNumber, userText, buttonId, userState) {
+    if (buttonId === 'cancel_operation') {
+        userStates.delete(userPhoneNumber);
+        await sendMessage(userPhoneNumber, "Action cancelled.");
+        const user = await getUserFromDatabase(userPhoneNumber);
+        if(user) {
+            setTimeout(() => sendMainMenu(userPhoneNumber, user), 1000);
+        }
         return;
     }
 
-    // Handle registration steps
+    if (userState.type === 'awaiting_transaction' && userText) {
+        await handleTransactionInput(userPhoneNumber, userText, userState.user);
+    } else if (userState.type === 'awaiting_pin_for_transaction' && userText) {
+        await handlePinForTransaction(userPhoneNumber, userText, userState);
+    } else if (userState.type === 'awaiting_flip_amount' && buttonId?.startsWith('flip_amount_')) {
+        const amount = buttonId.split('_')[2];
+        await handleFlipAmountSelection(userPhoneNumber, amount, userState);
+    } else if (userState.type === 'awaiting_pin_for_flip' && userText) {
+        await handlePinForFlip(userPhoneNumber, userText, userState);
+    } else {
+        await sendMessage(userPhoneNumber, "Please complete the current action or press Cancel.");
+    }
+}
+
+async function handleButtonSelection(userPhoneNumber, buttonId, user) {
+    switch (buttonId) {
+        case "games_option":
+            await sendGamesMenu(userPhoneNumber, user);
+            break;
+        case "wallet_option":
+            await sendWalletMenu(userPhoneNumber, user);
+            break;
+        case "send_crypto":
+            await handleSendCrypto(userPhoneNumber, user);
+            break;
+        case "receive_crypto":
+            await handleReceiveCrypto(userPhoneNumber, user);
+            break;
+        case "view_balance":
+            await handleViewBalance(userPhoneNumber, user);
+            break;
+        case "flip_it":
+            await handleStartFlipGame(userPhoneNumber, user);
+            break;
+        case "flip_choice_heads":
+            await handleFlipChoice(userPhoneNumber, user, 0);
+            break;
+        case "flip_choice_tails":
+            await handleFlipChoice(userPhoneNumber, user, 1);
+            break;
+        case "rock_paper_scissors":
+        case "guess_number":
+            await sendMessage(userPhoneNumber, "This feature is coming soon!");
+            break;
+    }
+}
+
+async function fetchAvaxPrice() {
+  const url = `${process.env.COINGECKO_API}/simple/price?ids=avalanche-2&vs_currencies=usd`;
+  const headers = {
+    'Accept': 'application/json',
+    'x-cg-demo-api-key': process.env.COINGECKO_API_KEY
+  };
+  try {
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`CoinGecko API error: ${response.status} ${response.statusText}`);
+    const data = await response.json();
+    const price = data['avalanche-2']?.usd;
+    if (price == null) throw new Error('Unexpected API response structure');
+    return price;
+  } catch (error) {
+    console.error(error.message);
+    return 0;
+  }
+}
+
+async function handleNewUserFlow(userPhoneNumber, userText, registrationState) {
+    if (!userText) {
+        await sendMessage(userPhoneNumber, "Please provide the requested information to continue.");
+        return;
+    }
+
     switch (registrationState.step) {
         case REGISTRATION_STEPS.AWAITING_USERNAME:
             await handleUsernameInput(userPhoneNumber, userText);
@@ -303,677 +299,568 @@ async function handleNewUserFlow(userPhoneNumber, userText) {
             await handlePinConfirmation(userPhoneNumber, userText);
             break;
         default:
+            registrationStates.delete(userPhoneNumber);
             await sendNewUserWelcomeMessage(userPhoneNumber);
     }
 }
 
-// ========== New User Welcome Message ==========
 async function sendNewUserWelcomeMessage(to) {
     try {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
             method: "POST",
-            headers: {
-                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-                "Content-Type": "application/json",
-            },
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
             data: {
-                messaging_product: "whatsapp",
-                to,
-                type: "interactive",
+                messaging_product: "whatsapp", to, type: "interactive",
                 interactive: {
-                    type: "button",
-                    header: {
-                        type: "text",
-                        text: "🚀 Welcome to Mort by Hot Coffee"
-                    },
-                    body: {
-                        text: "Hello! I'm Morty, your Wallet Agent that enables you to:\n\n💰 Send & receive crypto\n🎮 Play games and earn crypto\n📱 Manage your digital wallet\n\nTo get started, you'll need to create your account. This will only take a minute!"
-                    },
-                    footer: {
-                        text: "Secure • Fast • Easy"
-                    },
-                    action: {
-                        buttons: [
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "create_account",
-                                    title: "🔐 Create Account"
-                                }
-                            }
-                        ]
-                    }
+                    type: "button", header: { type: "text", text: "🚀 Welcome to Mort by Hot Coffee" },
+                    body: { text: "Hello! I'm Morty, your Wallet Agent that enables you to:\n\n💰 Send & receive crypto\n🎮 Play games and earn crypto\n📱 Manage your digital wallet\n\nTo get started, you'll need to create your account. This will only take a minute!" },
+                    footer: { text: "Secure • Fast • Easy" },
+                    action: { buttons: [{ type: "reply", reply: { id: "create_account", title: "🔐 Create Account" } }] }
                 }
             },
         });
         console.log("✅ New user welcome message sent to:", to);
     } catch (error) {
-        console.error("❌ Error sending new user welcome message:", error);
-        await sendMessage(to, "🚀 Welcome to Web3 ChatBot!\n\nTo get started, please reply with 'create account' to set up your profile.");
+        console.error("❌ Error sending new user welcome message:", error.response?.data || error.message);
     }
 }
 
-// ========== Welcome Back Message ==========
 async function sendWelcomeBackMessage(to, user) {
     try {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
             method: "POST",
-            headers: {
-                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-                "Content-Type": "application/json",
-            },
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
             data: {
-                messaging_product: "whatsapp",
-                to,
-                type: "interactive",
+                messaging_product: "whatsapp", to, type: "interactive",
                 interactive: {
-                    type: "button",
-                    header: {
-                        type: "text",
-                        text: `👋 Welcome back, ${user.username}!`
-                    },
-                    body: {
-                        text: "Great to see you again! What would you like to do today?\n\n🎮 Play games and earn crypto\n💰 Manage your wallet and transactions"
-                    },
-                    footer: {
-                        text: "Choose an option to continue"
-                    },
-                    action: {
-                        buttons: [
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "games_option",
-                                    title: "🎮 Games"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "wallet_option",
-                                    title: "💰 Wallet"
-                                }
-                            }
-                        ]
-                    }
+                    type: "button", header: { type: "text", text: `👋 Welcome back, ${user.username}!` },
+                    body: { text: "Great to see you again! What would you like to do today?\n\n🎮 Play games and earn crypto\n💰 Manage your wallet and transactions" },
+                    footer: { text: "Choose an option to continue" },
+                    action: { buttons: [{ type: "reply", reply: { id: "games_option", title: "🎮 Games" } }, { type: "reply", reply: { id: "wallet_option", title: "💰 Wallet" } }] }
                 }
             },
         });
         console.log("✅ Welcome back message sent to:", to);
     } catch (error) {
-        console.error("❌ Error sending welcome back message:", error);
-        await sendMessage(to, `👋 Welcome back, ${user.username}!\n\nType:\n/games - for games\n/wallet - for wallet features`);
+        console.error("❌ Error sending welcome back message:", error.response?.data || error.message);
     }
 }
 
-// ========== Registration Step Handlers ==========
 async function handleUsernameInput(userPhoneNumber, username) {
-    // Validate username
-    if (username.length < 3 || username.length > 20) {
-        await sendMessage(userPhoneNumber, "❌ Username must be between 3-20 characters. Please try again:");
+    if (username.length < 3 || username.length > 20 || !/^[a-zA-Z0-9_]+$/.test(username)) {
+        await sendMessage(userPhoneNumber, "❌ Invalid username (3-20 chars, letters, numbers, underscores).");
         return;
     }
-
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-        await sendMessage(userPhoneNumber, "❌ Username can only contain letters, numbers, and underscores. Please try again:");
-        return;
-    }
-
-    // Check if username exists
     const usernameExists = await checkUsernameExists(username);
     if (usernameExists) {
         await sendMessage(userPhoneNumber, "❌ This username is already taken. Please choose another one:");
         return;
     }
-
-    // Save username and move to email step
     const state = registrationStates.get(userPhoneNumber);
     state.username = username;
     state.step = REGISTRATION_STEPS.AWAITING_EMAIL;
     registrationStates.set(userPhoneNumber, state);
-
     await sendMessage(userPhoneNumber, `✅ Great! Username "${username}" is available.\n\nNow, please enter your email address:`);
 }
 
 async function handleEmailInput(userPhoneNumber, email) {
-    // Validate email
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         await sendMessage(userPhoneNumber, "❌ Please enter a valid email address:");
         return;
     }
-
-    // Save email and move to pin step
     const state = registrationStates.get(userPhoneNumber);
     state.email = email;
     state.step = REGISTRATION_STEPS.AWAITING_PIN;
     registrationStates.set(userPhoneNumber, state);
-
-    await sendMessage(userPhoneNumber, `✅ Email saved: ${email}\n\n🔐 Now, create a secure 4-6 digit transaction PIN.\n\n⚠️ This PIN will be used to authorize transactions and sensitive operations. Keep it secure!\n\nEnter your PIN:`);
+    await sendMessage(userPhoneNumber, `✅ Email saved: ${email}\n\n🔐 Now, create a secure 4-6 digit transaction PIN.\nEnter your PIN:`);
 }
 
 async function handlePinInput(userPhoneNumber, pin) {
-    // Validate PIN
     if (!/^\d{4,6}$/.test(pin)) {
         await sendMessage(userPhoneNumber, "❌ PIN must be 4-6 digits only. Please try again:");
         return;
     }
-
-    // Save PIN and ask for confirmation
     const state = registrationStates.get(userPhoneNumber);
     state.pin = pin;
     state.step = REGISTRATION_STEPS.CONFIRMING_PIN;
     registrationStates.set(userPhoneNumber, state);
-
     await sendMessage(userPhoneNumber, "🔒 Please confirm your PIN by entering it again:");
 }
 
 async function handlePinConfirmation(userPhoneNumber, confirmPin) {
     const state = registrationStates.get(userPhoneNumber);
-
     if (state.pin !== confirmPin) {
-        // Reset to PIN creation step
         state.step = REGISTRATION_STEPS.AWAITING_PIN;
         registrationStates.set(userPhoneNumber, state);
         await sendMessage(userPhoneNumber, "❌ PINs don't match. Please enter your 4-6 digit PIN again:");
         return;
     }
-
-    // Create user account
     try {
-        const hashedPin = await hashPin(state.pin);
-        const now = new Date().toISOString();
-
-        // Create wallet using Privy
         await sendMessage(userPhoneNumber, "🔗 Creating your secure wallet...");
         const walletData = await createWalletForUser(state.username);
-
+        const now = new Date().toISOString();
         const userData = {
-            whatsappId: userPhoneNumber,
-            username: state.username,
-            email: state.email,
-            security: {
-                hashedPin: hashedPin,
-                pinSetAt: now
-            },
-            wallet: {
-                primaryAddress: walletData.address,
-                walletId: walletData.walletId,
-                chainType: walletData.chainType,
-                balance: {
-                    AVAX: "0"
-                },
-                lastBalanceUpdate: now
-            },
-            stats: {
-                gamesPlayed: 0,
-                totalEarned: "0",
-                transactionCount: 0
-            },
-            createdAt: now,
-            lastSeen: now
+            whatsappId: userPhoneNumber, username: state.username, email: state.email,
+            security: { hashedPin: await hashPin(state.pin), pinSetAt: now },
+            wallet: { primaryAddress: walletData.address, walletId: walletData.walletId, chainType: walletData.chainType, balance: { AVAX: "0" }, lastBalanceUpdate: now },
+            stats: { gamesPlayed: 0, totalEarned: "0", transactionCount: 0 },
+            createdAt: now, lastSeen: now
         };
-
-        const success = await createUserInDatabase(userData);
-
-        if (success) {
-            // Clear registration state
+        if (await createUserInDatabase(userData)) {
             registrationStates.delete(userPhoneNumber);
-
-            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n✅ Email: ${state.email}\n✅ Security PIN: Set\n💰 Wallet Address: ${walletData.address}\n\nWelcome to Mort! Your secure Avax wallet has been created and you can now start playing games and managing your crypto.`);
-
-            // Send welcome options
+            await sendMessage(userPhoneNumber, `🎉 Account created successfully!\n\n✅ Username: ${state.username}\n💰 Wallet Address: ${walletData.address}\n\nWelcome to Mort!`);
             setTimeout(async () => {
                 const user = await getUserFromDatabase(userPhoneNumber);
                 await sendWelcomeBackMessage(userPhoneNumber, user);
-            }, 2000);
-
+            }, 1000);
         } else {
-            await sendMessage(userPhoneNumber, "❌ Sorry, there was an error creating your account. Please try again later.");
+            await sendMessage(userPhoneNumber, "❌ Error creating account.");
             registrationStates.delete(userPhoneNumber);
         }
-
     } catch (error) {
         console.error("❌ Error creating account:", error);
-        await sendMessage(userPhoneNumber, "❌ Sorry, there was an error creating your account. Please try again later.");
+        await sendMessage(userPhoneNumber, "❌ Error creating your account.");
         registrationStates.delete(userPhoneNumber);
     }
 }
 
-// ========== Wallet Menu ==========
 async function sendWalletMenu(to, user) {
     try {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-                "Content-Type": "application/json",
-            },
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
             data: {
-                messaging_product: "whatsapp",
-                to,
-                type: "interactive",
+                messaging_product: "whatsapp", to, type: "interactive",
                 interactive: {
-                    type: "button",
-                    header: {
-                        type: "text",
-                        text: `💰 ${user.username}'s Wallet`
-                    },
-                    body: {
-                        text: `Your Wallet Address:\n${user.wallet.primaryAddress}\n\nWhat would you like to do?`
-                    },
-                    footer: {
-                        text: "Avalanche Fuji Network"
-                    },
-                    action: {
-                        buttons: [
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "send_crypto",
-                                    title: "💸 Send Crypto"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "receive_crypto",
-                                    title: "📥 Receive Crypto"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "view_balance",
-                                    title: "📊 View Balance"
-                                }
-                            }
-                        ]
-                    }
+                    type: "button", header: { type: "text", text: `💰 ${user.username}'s Wallet` },
+                    body: { text: `Your Wallet Address:\n${user.wallet.primaryAddress}\n\nWhat would you like to do?` },
+                    footer: { text: "Avalanche Fuji Network" },
+                    action: { buttons: [{ type: "reply", reply: { id: "send_crypto", title: "💸 Send Crypto" } }, { type: "reply", reply: { id: "receive_crypto", title: "📥 Receive Crypto" } }, { type: "reply", reply: { id: "view_balance", title: "📊 View Balance" } }] }
                 }
             },
         });
         console.log("✅ Wallet menu sent to:", to);
     } catch (error) {
-        console.error("❌ Error sending wallet menu:", error);
-        await sendMessage(to, `💰 Welcome to Wallet, ${user.username}!\n\nType:\n/send - Send crypto\n/receive - Receive crypto\n/balance - View balance`);
+        console.error("❌ Error sending wallet menu:", error.response?.data || error.message);
     }
 }
 
-// ========== Games Menu ==========
 async function sendGamesMenu(to, user) {
     try {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-                "Content-Type": "application/json",
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp", to, type: "interactive",
+                interactive: {
+                    type: "button", header: { type: "text", text: `🎮 ${user.username}'s Games` },
+                    body: { text: `Games Played: ${user.stats.gamesPlayed}\nChoose a game to play:` },
+                    footer: { text: "Play • Earn • Have Fun" },
+                    action: { buttons: [{ type: "reply", reply: { id: "flip_it", title: "🎲 Flip It" } }, { type: "reply", reply: { id: "rock_paper_scissors", title: "✂️ Rock Paper" } }, { type: "reply", reply: { id: "guess_number", title: "🔢 Guess Number" } }] }
+                }
             },
+        });
+        console.log("✅ Games menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending games menu:", error.response?.data || error.message);
+    }
+}
+
+async function sendMainMenu(to, user) {
+    try {
+        const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
+        const balance = await publicClient.getBalance({ address: user.wallet.primaryAddress });
+        const user_bal = Number(formatEther(balance)).toFixed(3);
+        const avaxPrice = await fetchAvaxPrice();
+        const usdValue = avaxPrice * parseFloat(user_bal);
+
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp", to, type: "interactive",
+                interactive: {
+                    type: "button", header: { type: "text", text: "What's Next?" },
+                    body: { text: `Your current balance is\n🔺AVAX: ${user_bal}\n💲${usdValue.toFixed(2)}\n\nChoose an option to continue.`},
+                    footer: { text: "Mort by Hot Coffee" },
+                    action: { buttons: [{ type: "reply", reply: { id: "games_option", title: "🎮 Games" } }, { type: "reply", reply: { id: "wallet_option", title: "💰 Wallet" } }] }
+                }},
+        });
+        console.log("✅ Main menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending main menu:", error.response?.data || error.message);
+    }
+}
+
+async function sendPostGameMenu(to) {
+    try {
+        const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
+        const user = await getUserFromDatabase(to);
+        if (!user) return;
+
+        const balance = await publicClient.getBalance({ address: user.wallet.primaryAddress });
+        const balanceFormatted = Number(formatEther(balance)).toFixed(3);
+
+        const data = {
+            messaging_product: "whatsapp",
+            to,
+            type: "interactive",
+            interactive: {
+                type: "button",
+                header: { type: "text", text: "Round Complete!" },
+                body: { text: `Your current balance is 🔺 *${balanceFormatted} AVAX*.\n\nWhat would you like to do next?` },
+                footer: { text: "Choose an option to continue" },
+                action: {
+                    buttons: [
+                        { type: "reply", reply: { id: "games_option", title: "🎮 Play Games" } },
+                        { type: "reply", reply: { id: "wallet_option", title: "💰 Go to Wallet" } }
+                    ]
+                }
+            }
+        };
+
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: data,
+        });
+        console.log("✅ Post-game menu sent to:", to);
+    } catch (error) {
+        console.error("❌ Error sending post-game menu:", error.response?.data || error.message);
+    }
+}
+
+async function handleReceiveCrypto(userPhoneNumber, user) {
+    await sendMessage(userPhoneNumber, user.wallet.primaryAddress);
+    await sendMessage(userPhoneNumber, `📥 Send 🔺AVAX to this address on the Avalanche Fuji network.`);
+    setTimeout(() => sendMainMenu(userPhoneNumber, user), 2000);
+}
+
+async function handleViewBalance(userPhoneNumber, user) {
+    try {
+        const price = await fetchAvaxPrice();
+        await sendMessage(userPhoneNumber, "📊 Checking your balance...");
+        const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
+        const balance = await publicClient.getBalance({ address: user.wallet.primaryAddress });
+        const user_bal = Number(formatEther(balance)).toFixed(3);
+        await sendMessage(userPhoneNumber, `💰 Wallet Balance\n🔺AVAX: ${user_bal}\n💲${(parseFloat(user_bal) * price).toFixed(2)}`);
+        setTimeout(() => sendMainMenu(userPhoneNumber, user), 2000);
+    } catch (error) {
+        console.error("❌ Error fetching balance:", error);
+        await sendMessage(userPhoneNumber, "❌ Sorry, I couldn't fetch your balance right now.");
+    }
+}
+
+async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
+    const { user, transaction } = userState;
+    const isValidPin = await bcrypt.compare(enteredPin, user.security.hashedPin);
+    if (!isValidPin) {
+        await sendMessage(userPhoneNumber, "❌ Incorrect PIN. Transaction cancelled.");
+        userStates.delete(userPhoneNumber);
+        setTimeout(() => sendMainMenu(userPhoneNumber, user), 1500);
+        return;
+    }
+    await sendMessage(userPhoneNumber, "✅ PIN verified. Processing transaction...");
+    try {
+        const account = await createViemAccount({
+            walletId: user.wallet.walletId,
+            address: user.wallet.primaryAddress,
+            privy
+        });
+        const client = createWalletClient({ account, chain: avalancheFuji, transport: http() });
+        const txHash = await client.sendTransaction({ to: transaction.toAddress, value: parseEther(transaction.amount) });
+        const explorerUrl = `https://testnet.snowtrace.io/tx/${txHash}`;
+        await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n${explorerUrl}`);
+        await updateDoc(doc(db, 'users', userPhoneNumber), { 'stats.transactionCount': (user.stats.transactionCount || 0) + 1 });
+    } catch (txError) {
+        console.error("TX Error:", txError.message);
+        await sendMessage(userPhoneNumber, "❌ Transaction failed. Please check your balance and try again.");
+    }
+    userStates.delete(userPhoneNumber);
+    setTimeout(() => sendMainMenu(userPhoneNumber, user), 2000);
+}
+
+async function startBlockchainListener() {
+    console.log("👂 Starting blockchain event listener with WebSocket...");
+    const publicClient = createPublicClient({
+        chain: avalancheFuji,
+        transport: webSocket(WSS_RPC_URL)
+    });
+
+    publicClient.watchContractEvent({
+        address: FLIP_GAME_CONTRACT_ADDRESS, abi: flipGameAbi, eventName: 'FlipResolved',
+        onLogs: async (logs) => {
+            for (const log of logs) {
+                try {
+                    const { requestId, won, payout = 0n } = log.args;
+                    const requestIdStr = requestId.toString();
+                    const flipDocRef = doc(db, 'flips', requestIdStr);
+                    const flipDocSnap = await getDoc(flipDocRef);
+
+                    if (!flipDocSnap.exists() || flipDocSnap.data().status !== 'pending') continue;
+
+                    const flipData = flipDocSnap.data();
+                    const userDocRef = doc(db, 'users', flipData.whatsappId);
+                    const userDocSnap = await getDoc(userDocRef);
+                    if (!userDocSnap.exists()) continue;
+
+                    const userData = userDocSnap.data();
+                    const payoutFormatted = formatEther(payout);
+                    
+                    const userChoice = flipData.choice;
+                    const userChoiceStr = userChoice === 0 ? 'Heads' : 'Tails';
+                    
+                    const actualResult = won ? userChoice : (1 - userChoice);
+                    const resultStr = actualResult === 0 ? '🗿 Heads' : '🪙 Tails';
+
+                    let messageBody;
+                    if (won) {
+                        messageBody = `The coin landed on *${resultStr}*!\n\nYou chose *${userChoiceStr}* and WON! 🎉\n\nYou've received ${payoutFormatted} AVAX.`;
+                    } else {
+                        messageBody = `The coin landed on *${resultStr}*.\n\nYou chose *${userChoiceStr}* and lost.\nBetter luck next time!`;
+                    }
+                    
+                    await sendMessage(flipData.whatsappId, messageBody);
+
+                    await updateDoc(flipDocRef, { 
+                        status: 'resolved', 
+                        result: won ? 'won' : 'lost', 
+                        payoutAmount: payoutFormatted, 
+                        resolvedTimestamp: serverTimestamp() 
+                    });
+                    
+                    const userStatsUpdate = {
+                        'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1
+                    };
+
+                    if (won) {
+                        const newTotalEarned = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(payoutFormatted)).toString();
+                        userStatsUpdate['stats.totalEarned'] = newTotalEarned;
+                    }
+
+                    await updateDoc(userDocRef, userStatsUpdate);
+
+                    setTimeout(() => {
+                        sendPostGameMenu(flipData.whatsappId);
+                    }, 2000);
+
+                } catch(e) { 
+                    console.error("Error processing a resolved flip log:", e); 
+                }
+            }
+        },
+        onError: (error) => console.error("Blockchain listener error:", error)
+    });
+}
+
+async function handleSendCrypto(userPhoneNumber, user) {
+    userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
+    
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp",
+                to: userPhoneNumber,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    body: { text: "💸 *Send Crypto*\nPlease enter the transaction details in this format:\n\n`send [amount] to [address]`" },
+                    action: {
+                        buttons: [
+                            { type: "reply", reply: { id: "cancel_operation", title: "❌ Cancel" } }
+                        ]
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("❌ Error sending send crypto prompt:", error.response?.data || error.message);
+        await sendMessage(userPhoneNumber, "💸 Send Crypto\nPlease enter in this format: 'send [amount] to [address]'\n\n(Reply with 'cancel' to exit)");
+    }
+}
+
+async function handleTransactionInput(userPhoneNumber, userText, user) {
+    const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40})/i;
+    const match = userText.match(regex);
+    if (!match) {
+        await sendMessage(userPhoneNumber, "❌ Invalid format. Please use:\n`send [amount] to [address]`\n\nOr press Cancel below.");
+        return;
+    }
+    const [_, amount, toAddress] = match;
+    userStates.set(userPhoneNumber, { type: 'awaiting_pin_for_transaction', user: user, transaction: { amount, toAddress } });
+
+    try {
+        const bodyText = `🔐 *Confirm Transaction*\n\n*Amount:* ${amount} AVAX\n*To:* ${toAddress}\n\nPlease enter your PIN to confirm.`
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp",
+                to: userPhoneNumber,
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    body: { text: bodyText },
+                    action: {
+                        buttons: [
+                            { type: "reply", reply: { id: "cancel_operation", title: "❌ Cancel" } }
+                        ]
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("❌ Error sending PIN prompt:", error.response?.data || error.message);
+        await sendMessage(userPhoneNumber, `🔐 Confirm Transaction\n💸 Amount: ${amount} AVAX\nTo: ${toAddress}\n\nEnter your PIN:`);
+    }
+}
+
+async function handleStartFlipGame(to, user) {
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp", to, type: "interactive",
+                interactive: {
+                    type: "button", header: { type: "text", text: "🎲 Flip It Game" },
+                    body: { text: "Heads or Tails? Make your choice." }, footer: { text: "Provably fair on-chain coin flip." },
+                    action: { buttons: [{ type: "reply", reply: { id: "flip_choice_heads", title: "🗿 Heads" } }, { type: "reply", reply: { id: "flip_choice_tails", title: "🪙 Tails" } }] }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("❌ Error sending flip game start message:", error.response?.data || error.message);
+    }
+}
+
+async function sendFlipAmountMenu(to, choice) {
+    const choiceText = choice === 0 ? "Heads" : "Tails";
+    try {
+        await axios({
+            url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
+            method: "POST",
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
             data: {
                 messaging_product: "whatsapp",
                 to,
                 type: "interactive",
                 interactive: {
                     type: "button",
-                    header: {
-                        type: "text",
-                        text: `🎮 ${user.username}'s Games`
-                    },
-                    body: {
-                        text: `Welcome to Games!\n\nGames Played: ${user.stats.gamesPlayed}\nTotal Earned: ${user.stats.totalEarned} tokens\n\nChoose a game to play:`
-                    },
-                    footer: {
-                        text: "Play • Earn • Have Fun"
-                    },
+                    header: { type: "text", text: `You Chose ${choiceText}` },
+                    body: { text: "How much AVAX would you like to bet? 🔺" },
+                    footer: { text: "Select a bet amount" },
                     action: {
                         buttons: [
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "flip_it",
-                                    title: "🎲 Flip It"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "rock_paper_scissors",
-                                    title: "✂️ Rock Paper"
-                                }
-                            },
-                            {
-                                type: "reply",
-                                reply: {
-                                    id: "guess_number",
-                                    title: "🔢 Guess Number"
-                                }
-                            }
+                            { type: "reply", reply: { id: "flip_amount_0.001", title: "0.001 AVAX" } },
+                            { type: "reply", reply: { id: "flip_amount_0.01", title: "0.01 AVAX" } },
+                            { type: "reply", reply: { id: "flip_amount_0.1", title: "0.1 AVAX" } }
                         ]
                     }
                 }
-            },
-        });
-        console.log("✅ Games menu sent to:", to);
-    } catch (error) {
-        console.error("❌ Error sending games menu:", error);
-        await sendMessage(to, `🎮 Welcome to Games, ${user.username}!\n\nType:\n/flip - Flip It\n/rps - Rock Paper Scissors\n/guess - Guess the Number`);
-    }
-}
-
-// ========== Handle User Selection ==========
-async function handleUserSelection(userPhoneNumber, selection, user) {
-    if (selection === "/games") {
-        // Send games menu with interactive buttons
-        await sendGamesMenu(userPhoneNumber, user);
-    } else if (selection === "/wallet") {
-        // Send wallet menu with interactive buttons
-        await sendWalletMenu(userPhoneNumber, user);
-    }
-}
-
-// ========== Wallet Functions ==========
-async function handleReceiveCrypto(userPhoneNumber, user) {
-    // First send just the wallet address
-    await sendMessage(userPhoneNumber, user.wallet.primaryAddress);
-
-    // Then send the instructions
-    await sendMessage(userPhoneNumber, `📥 Receive Crypto\n\nSend 🔺 AVAX to this address on the Avalanche Fuji network.\n\n🔺 Only send AVAX on Avalanche Fuji network to this address!`);
-}
-
-async function handleViewBalance(userPhoneNumber, user) {
-    try {
-        await sendMessage(userPhoneNumber, "📊 Checking your balance...");
-
-        // Get balance using Privy API
-        const balance = await getWalletBalance(user.wallet.primaryAddress);
-
-        if (balance && balance.balances && balance.balances.length > 0) {
-            const avaxBalance = balance.balances.find(b => b.asset === 'eth' && b.chain === 'avalanche-fuji');
-
-            if (avaxBalance) {
-                const balanceMessage = `💰 Your Wallet Balance\n\n🔺 AVAX: ${avaxBalance.display_values.eth} AVAX\n💲 USD Value: $${avaxBalance.display_values.usd}\n\nNetwork: Avalanche Fuji`;
-                await sendMessage(userPhoneNumber, balanceMessage);
-            } else {
-                await sendMessage(userPhoneNumber, `💰 Your Wallet Balance\n\n🔺 AVAX: 0 AVAX\n💲 USD Value: $0.00\n\nNetwork: Avalanche Fuji`);
             }
-        } else {
-            await sendMessage(userPhoneNumber, `💰 Your Wallet Balance\n\n🔺 AVAX: 0 AVAX\n💲 USD Value: $0.00\n\nNetwork: Avalanche Fuji`);
+        });
+    } catch (error) {
+        console.error("❌ Error sending flip amount menu:", error.response?.data || error.message);
+        await sendMessage(to, "Sorry, there was an error. Please try starting the game again.");
+        userStates.delete(to);
+    }
+}
+
+async function handleFlipChoice(phone, user, choice) {
+    userStates.set(phone, { type: 'awaiting_flip_amount', user, choice });
+    await sendFlipAmountMenu(phone, choice);
+}
+
+async function handleFlipAmountSelection(phone, amount, state) {
+    const { user, choice } = state;
+    await sendMessage(phone, `🔐 Confirm Flip\n\n🎲 Choice: ${choice === 0 ? 'Heads' : 'Tails'}\n💸 Bet: ${amount} AVAX\n\nEnter your PIN:`);
+    userStates.set(phone, { type: 'awaiting_pin_for_flip', user, flip: { amount, choice } });
+}
+
+async function handlePinForFlip(phone, pin, state) {
+    const { user, flip } = state;
+    try {
+        if (!(await bcrypt.compare(pin, user.security.hashedPin))) {
+            userStates.delete(phone);
+            await sendMessage(phone, "❌ Incorrect PIN. Game cancelled.");
+            setTimeout(() => sendGamesMenu(phone, user), 1500);
+            return;
         }
-    } catch (error) {
-        console.error("❌ Error fetching balance:", error);
-        await sendMessage(userPhoneNumber, "❌ Sorry, I couldn't fetch your balance right now. Please try again later.");
+        await sendMessage(phone, "✅ PIN verified. Placing your bet...");
+        const result = await executeFlipTransaction(user, flip.choice, flip.amount);
+        const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
+        if (result.success) {
+            await sendMessage(phone, `🎉 Bet placed! We'll notify you of the result.\n\nTransaction Hash:\n${explorerUrl}`);
+        } else {
+            await sendMessage(phone, `❌ Bet failed. ${result.error || "Check balance and try again."}`);
+        }
+    } catch (e) {
+        await sendMessage(phone, "❌ Bet failed due to a network or balance issue.");
+        console.error("Error during flip transaction execution:", e.message);
+    } finally {
+        userStates.delete(phone);
     }
 }
 
-async function handleSendCrypto(userPhoneNumber, user) {
-    await sendMessage(userPhoneNumber, "💸 Send Crypto\n\nPlease provide the following information:\n\n1️⃣ Recipient address\n2️⃣ Amount in AVAX\n\nExample: Send 0.01 AVAX to 0x742d35Cc6634C0532925a3b844Bc454e4438f44e\n\nPlease enter in this format: 'send [amount] to [address]'");
-
-    // Set user state for transaction
-    userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
-}
-
-async function getWalletBalance(w) {
+async function executeFlipTransaction(user, choice, amount) {
     try {
-        const publicClient = createPublicClient({
-            chain: avalancheFuji,
-            transport: http()
-        });
-
-        const balance = await publicClient.getBalance({
-            address: w,
-        });
-
-        const amount_usd = await fetchAvaxPrice() * formatEther(balance);
-
-        return {
-            balances: [{
-                asset: 'eth',
-                chain: 'avalanche-fuji',
-                display_values: {
-                    eth: formatEther(balance),
-                    usd: amount_usd,
-                }
-            }]
-        };
-    } catch (error) {
-        console.error("❌ Error fetching wallet balance:", error);
-        throw error;
-    }
-}
-
-
-async function fetchAvaxPrice() {
-    try {
-        const response = await fetch(process.env.COINGECKO_API);
-        const data = await response.json();
-        return data['avalanche-2'].usd
-    } catch (error) {
-        console.error(error.message);
-        return null;
-    }
-}
-
-async function sendTransaction(user, toAddress, amount) {
-    try {
-        // Create a viem account instance for the wallet
         const account = await createViemAccount({
             walletId: user.wallet.walletId,
             address: user.wallet.primaryAddress,
             privy
         });
+        const walletClient = createWalletClient({ account, chain: avalancheFuji, transport: http() });
+        const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
 
-        // Create wallet client
-        const client = createWalletClient({
-            account,
-            chain: avalancheFuji,
-            transport: http()
-        });
+        const hash = await walletClient.writeContract({ address: FLIP_GAME_CONTRACT_ADDRESS, abi: flipGameAbi, functionName: 'flip', args: [choice], value: parseEther(amount) });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
-        // Send transaction
-        const hash = await client.sendTransaction({
-            to: toAddress,
-            value: parseEther(amount)
-        });
-
-        return hash;
-    } catch (error) {
-        console.error("❌ Error sending transaction:", error);
-        throw error;
-    }
-}
-
-async function handleTransactionInput(userPhoneNumber, userText, user) {
-    try {
-        // Parse the transaction input
-        // Expected format: "send [amount] to [address]"
-        const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40})/i;
-        const match = userText.match(regex);
-
-        if (!match) {
-            await sendMessage(userPhoneNumber, "❌ Invalid format. Please use: 'send [amount] to [address]'\n\nExample: send 0.01 to 0x742d35Cc6634C0532925a3b844Bc454e4438f44e");
-            return;
-        }
-
-        const amount = match[1];
-        const toAddress = match[2];
-
-        // Validate amount
-        if (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-            await sendMessage(userPhoneNumber, "❌ Invalid amount. Please enter a valid number greater than 0.");
-            return;
-        }
-
-        // Validate address format
-        if (!/^0x[a-fA-F0-9]{40}$/.test(toAddress)) {
-            await sendMessage(userPhoneNumber, "❌ Invalid address format. Please enter a valid Ethereum address starting with 0x.");
-            return;
-        }
-
-        // Ask for PIN confirmation
-        await sendMessage(userPhoneNumber, `🔐 Transaction Confirmation\n\n💸 Amount: ${amount} AVAX\n📧 To: ${toAddress}\n⛓️ Network: Avalanche Fuji\n\nPlease enter your 4-6 digit PIN to confirm this transaction:`);
-
-        // Set user state for PIN confirmation
-        userStates.set(userPhoneNumber, {
-            type: 'awaiting_pin_for_transaction',
-            user: user,
-            transaction: {
-                amount: amount,
-                toAddress: toAddress
+        for (const log of receipt.logs) {
+            if (log.address.toLowerCase() !== FLIP_GAME_CONTRACT_ADDRESS.toLowerCase()) {
+                continue;
             }
-        });
-
-    } catch (error) {
-        console.error("❌ Error handling transaction input:", error);
-        await sendMessage(userPhoneNumber, "❌ Sorry, there was an error processing your transaction. Please try again.");
-        userStates.delete(userPhoneNumber);
-    }
-}
-
-async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
-    try {
-        const { user, transaction } = userState;
-
-        // Validate PIN format
-        if (!/^\d{4,6}$/.test(enteredPin)) {
-            await sendMessage(userPhoneNumber, "❌ PIN must be 4-6 digits only. Please try again:");
-            return;
-        }
-
-        // Verify PIN against stored hash
-        const isValidPin = await bcrypt.compare(enteredPin, user.security.hashedPin);
-
-        if (!isValidPin) {
-            await sendMessage(userPhoneNumber, "❌ Incorrect PIN. Transaction cancelled for security.");
-            userStates.delete(userPhoneNumber);
-            return;
-        }
-
-        // PIN is correct, process the transaction
-        await sendMessage(userPhoneNumber, "✅ PIN verified. Processing transaction...");
-
-        try {
-            const txHash = await sendTransaction(user, transaction.toAddress, transaction.amount);
-
-            await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n\n💸 Sent: ${transaction.amount} AVAX\n📧 To: ${transaction.toAddress}\n🔗 Transaction Hash: ${txHash}\n⛓️ Network: Avalanche Fuji\n\nView transaction details on Snowscan:\nhttps://testnet.snowscan.xyz/tx/${txHash}\n\nYour transaction is being processed on the blockchain.`);
-
-            // Update user transaction count
-            const userRef = doc(db, 'users', userPhoneNumber);
-            await updateDoc(userRef, {
-                'stats.transactionCount': user.stats.transactionCount + 1,
-                lastSeen: serverTimestamp()
-            });
-
-        } catch (txError) {
-            console.error("❌ Transaction failed:", txError);
-            await sendMessage(userPhoneNumber, "❌ Transaction failed. This could be due to insufficient balance, network issues, or invalid recipient address. Please check your balance and try again.");
-        }
-
-        // Clear user state
-        userStates.delete(userPhoneNumber);
-
-    } catch (error) {
-        console.error("❌ Error handling PIN for transaction:", error);
-        await sendMessage(userPhoneNumber, "❌ Sorry, there was an error processing your PIN. Please try again later.");
-        userStates.delete(userPhoneNumber);
-    }
-}
-
-// ========== Initialize User Chat Session ==========
-function initializeUserChat(userPhoneNumber, selectedOption, user) {
-    const contextInstruction = selectedOption === "/games"
-        ? `You are a helpful gaming assistant for ${user.username}. Help users with game-related queries, provide gaming tips, and make the experience fun and engaging. The user has played ${user.stats.gamesPlayed} games and earned ${user.stats.totalEarned} tokens so far.`
-        : `You are a helpful wallet and financial assistant for ${user.username}. Help users with wallet operations, transaction queries, and provide financial guidance while being secure and professional. 🔺 Avax ${user.wallet.balance.AVAX}.`;
-
-    const userChat = ai.chats.create({
-        model: "gemini-2.0-flash",
-        history: [],
-        config: {
-            systemInstruction: contextInstruction
-        }
-    });
-
-    // Set TTL for conversation
-    setTimeout(() => {
-        userStates.delete(userPhoneNumber);
-    }, CONVERSATION_TTL);
-
-    userStates.set(userPhoneNumber, userChat);
-}
-
-// ========== AI Response Generator ==========
-async function generateAIResponse(userPhoneNumber, userPrompt) {
-    try {
-        // Get or create user chat history
-        let userChat = userStates.get(userPhoneNumber);
-
-        if (!userChat) {
-            // If no chat exists, create a general one
-            userChat = ai.chats.create({
-                model: "gemini-2.0-flash",
-                history: [],
-                config: {
-                    systemInstruction: "You are a friendly and helpful Web3 AI assistant. Provide useful and engaging responses about crypto, gaming, and digital wallets."
+            try {
+                const decodedEvent = decodeEventLog({ abi: flipGameAbi, data: log.data, topics: log.topics });
+                if (decodedEvent.eventName === 'FlipRequested') {
+                    await setDoc(doc(db, 'flips', decodedEvent.args.requestId.toString()), {
+                        whatsappId: user.whatsappId, username: user.username, betAmount: amount, choice, status: 'pending', requestTimestamp: serverTimestamp(), txHash: hash
+                    });
+                    return { success: true, hash };
                 }
-            });
-
-            // Set TTL for conversation
-            setTimeout(() => {
-                userStates.delete(userPhoneNumber);
-            }, CONVERSATION_TTL);
-
-            userStates.set(userPhoneNumber, userChat);
+            } catch (e) {
+                console.warn("Could not decode a log from the game contract:", e.message);
+            }
         }
-
-        // Generate response
-        const response = await userChat.sendMessage({
-            message: userPrompt
-        });
-
-        return response.text;
-
-    } catch (err) {
-        console.error("❌ AI error:", err);
-
-        // Handle specific error types
-        if (err.message?.includes('rate limit')) {
-            return "I'm receiving too many messages right now. Please try again in a moment.";
-        } else if (err.message?.includes('safety')) {
-            return "I apologize, but I cannot provide a response to that type of content. Please remember that I'm here to help in a safe and constructive way.";
-        }
-
-        return "I'm having trouble responding at the moment. Please try again later.";
+        return { success: false, error: 'Could not confirm request ID on-chain.' };
+    } catch (e) {
+        console.error("Flip TX Error:", e);
+        throw e;
     }
 }
 
-// ========== WhatsApp Send Message ==========
 async function sendMessage(to, body) {
     try {
         await axios({
             url: "https://graph.facebook.com/v22.0/696395350222810/messages",
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-                "Content-Type": "application/json",
-            },
-            data: {
-                messaging_product: "whatsapp",
-                to,
-                type: "text",
-                text: { body },
-            },
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: { messaging_product: "whatsapp", to, type: "text", text: { body } }
         });
     } catch (error) {
-        console.error("❌ Error sending message:", error.response?.data || error);
+        console.error("❌ Error sending message:", error.response?.data || error.message);
     }
 }
 
 app.listen(PORT, () => {
     console.log("🚀 Web3 ChatBot Server running on port", PORT);
-    console.log("🔐 Security: bcrypt pin hashing enabled");
-    console.log("💾 Database: Firestore integration active");
-    console.log("🤖 AI: Gemini 2.0 Flash ready");
+    startBlockchainListener().catch(error => {
+        console.error("🔥 Fatal error starting the blockchain listener:", error);
+    });
 });

@@ -9,7 +9,7 @@
     "start": "node index"
   },
   "engines": {
-    "node": "22.10.0"
+    "node": "22.10"
   },
   "keywords": [
     "wallet",
@@ -25,6 +25,7 @@
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "firebase": "^11.9.1",
+    "module": "^1.2.5",
     "viem": "^2.31.4"
   }
 }

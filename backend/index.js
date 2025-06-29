@@ -54,7 +54,6 @@ const REGISTRATION_STEPS = {
     CONFIRMING_PIN: 'confirming_pin'
 };
 
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 async function getUserFromDatabase(whatsappId) {
     try {
@@ -208,7 +207,7 @@ async function handleStatefulInput(userPhoneNumber, userText, buttonId, userStat
         userStates.delete(userPhoneNumber);
         await sendMessage(userPhoneNumber, "Action cancelled.");
         const user = await getUserFromDatabase(userPhoneNumber);
-        if(user) {
+        if (user) {
             setTimeout(() => sendMainMenu(userPhoneNumber, user), 1000);
         }
         return;
@@ -223,7 +222,7 @@ async function handleStatefulInput(userPhoneNumber, userText, buttonId, userStat
         await handleFlipAmountSelection(userPhoneNumber, amount, userState);
     } else if (userState.type === 'awaiting_pin_for_flip' && userText) {
         await handlePinForFlip(userPhoneNumber, userText, userState);
-    } 
+    }
     else if (userState.type === 'awaiting_rps_amount' && buttonId?.startsWith('rps_amount_')) {
         const amount = buttonId.split('_')[2];
         await handleRpsAmountSelection(userPhoneNumber, amount, userState);
@@ -265,13 +264,13 @@ async function handleButtonSelection(userPhoneNumber, buttonId, user) {
             await handleStartRpsGame(userPhoneNumber, user);
             break;
         case "rps_choice_rock":
-            await handleRpsChoice(userPhoneNumber, user, 0); 
+            await handleRpsChoice(userPhoneNumber, user, 0);
             break;
         case "rps_choice_paper":
-            await handleRpsChoice(userPhoneNumber, user, 1); 
+            await handleRpsChoice(userPhoneNumber, user, 1);
             break;
         case "rps_choice_scissor":
-            await handleRpsChoice(userPhoneNumber, user, 2); 
+            await handleRpsChoice(userPhoneNumber, user, 2);
             break;
         case "guess_number":
             await sendMessage(userPhoneNumber, "This feature is coming soon!");
@@ -336,7 +335,7 @@ async function startBlockchainListener() {
 
                     const userData = userDocSnap.data();
                     const payoutFormatted = formatEther(payout);
-                    
+
                     const userChoice = flipData.choice;
                     const userChoiceStr = userChoice === 0 ? 'Heads' : 'Tails';
                     const actualResult = won ? userChoice : (1 - userChoice);
@@ -348,10 +347,10 @@ async function startBlockchainListener() {
                     } else {
                         messageBody = `The coin landed on *${resultStr}*.\n\nYou chose *${userChoiceStr}* and lost.\nBetter luck next time!`;
                     }
-                    
+
                     await sendMessage(flipData.whatsappId, messageBody);
                     await updateDoc(flipDocRef, { status: 'resolved', result: won ? 'won' : 'lost', payoutAmount: payoutFormatted, resolvedTimestamp: serverTimestamp() });
-                    
+
                     const userStatsUpdate = { 'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1 };
                     if (won) {
                         userStatsUpdate['stats.totalEarned'] = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(payoutFormatted)).toString();
@@ -360,7 +359,7 @@ async function startBlockchainListener() {
 
                     setTimeout(() => sendPostGameMenu(flipData.whatsappId), 2000);
 
-                } catch(e) { console.error("Error processing a resolved flip log:", e); }
+                } catch (e) { console.error("Error processing a resolved flip log:", e); }
             }
         },
         onError: (error) => console.error("Flip Game listener error:", error)
@@ -381,7 +380,7 @@ async function startBlockchainListener() {
                     const userDocRef = doc(db, 'users', rpsData.whatsappId);
                     const userDocSnap = await getDoc(userDocRef);
                     if (!userDocSnap.exists()) continue;
-                    
+
                     const userData = userDocSnap.data();
                     const prizeFormatted = formatEther(prizeAmount);
 
@@ -389,13 +388,13 @@ async function startBlockchainListener() {
                     const outcomeMap = ['You Win! 🎉', 'You Lose 😔', 'It\'s a Draw! 🤝'];
 
                     const messageBody = `*${outcomeMap[outcome]}*\n\nYou chose ${choiceMap[playerChoice]}\nComputer chose ${choiceMap[computerChoice]}\n\n${outcome === 0 ? `You won ${prizeFormatted} AVAX!` : outcome === 2 ? `Your bet of ${rpsData.betAmount} AVAX was returned.` : 'Better luck next time!'}`;
-                    
+
                     await sendMessage(rpsData.whatsappId, messageBody);
 
                     await updateDoc(rpsDocRef, { status: 'resolved', result: outcomeMap[outcome], prizeAmount: prizeFormatted, resolvedTimestamp: serverTimestamp() });
 
                     const userStatsUpdate = { 'stats.gamesPlayed': (userData.stats.gamesPlayed || 0) + 1 };
-                    if (outcome === 0) { 
+                    if (outcome === 0) {
                         userStatsUpdate['stats.totalEarned'] = (parseFloat(userData.stats.totalEarned || "0") + parseFloat(prizeFormatted)).toString();
                     }
                     await updateDoc(userDocRef, userStatsUpdate);
@@ -419,11 +418,13 @@ async function handleStartRpsGame(to, user) {
                 interactive: {
                     type: "button", header: { type: "text", text: "✊ Rock Paper Scissor" },
                     body: { text: "Make your choice to begin!" },
-                    action: { buttons: [
-                        { type: "reply", reply: { id: "rps_choice_rock", title: "✊ Rock" } }, 
-                        { type: "reply", reply: { id: "rps_choice_paper", title: "✋ Paper" } },
-                        { type: "reply", reply: { id: "rps_choice_scissor", title: "✌️ Scissor" } }
-                    ] }
+                    action: {
+                        buttons: [
+                            { type: "reply", reply: { id: "rps_choice_rock", title: "✊ Rock" } },
+                            { type: "reply", reply: { id: "rps_choice_paper", title: "✋ Paper" } },
+                            { type: "reply", reply: { id: "rps_choice_scissor", title: "✌️ Scissor" } }
+                        ]
+                    }
                 }
             }
         });
@@ -458,7 +459,7 @@ async function handlePinForRps(phone, pin, state) {
         const result = await executeRpsTransaction(user, rps.choice, rps.amount);
         if (result.success) {
             const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
-            await sendMessage(phone, `🎉 Bet placed! We'll notify you of the result.\n\nTransaction Hash:\n${explorerUrl}`);
+            await sendCtaUrlMessage(phone, `🎉 Bet placed! We'll notify you of the result.`, "View Transaction", explorerUrl);
         } else {
             await sendMessage(phone, `❌ Bet failed. ${result.error || "Check balance and try again."}`);
         }
@@ -479,12 +480,12 @@ async function executeRpsTransaction(user, choice, amount) {
         const walletClient = createWalletClient({ account, chain: avalancheFuji, transport: http() });
         const publicClient = createPublicClient({ chain: avalancheFuji, transport: http() });
 
-        const hash = await walletClient.writeContract({ 
-            address: RPS_GAME_CONTRACT_ADDRESS, 
-            abi: rpsGameAbi, 
-            functionName: 'play', 
-            args: [choice], 
-            value: parseEther(amount) 
+        const hash = await walletClient.writeContract({
+            address: RPS_GAME_CONTRACT_ADDRESS,
+            abi: rpsGameAbi,
+            functionName: 'play',
+            args: [choice],
+            value: parseEther(amount)
         });
 
         const receipt = await publicClient.waitForTransactionReceipt({ hash });
@@ -511,22 +512,22 @@ async function executeRpsTransaction(user, choice, amount) {
 }
 
 async function fetchAvaxPrice() {
-  const url = `${process.env.COINGECKO_API}/simple/price?ids=avalanche-2&vs_currencies=usd`;
-  const headers = {
-    'Accept': 'application/json',
-    'x-cg-demo-api-key': process.env.COINGECKO_API_KEY
-  };
-  try {
-    const response = await fetch(url, { headers });
-    if (!response.ok) throw new Error(`CoinGecko API error: ${response.status} ${response.statusText}`);
-    const data = await response.json();
-    const price = data['avalanche-2']?.usd;
-    if (price == null) throw new Error('Unexpected API response structure');
-    return price;
-  } catch (error) {
-    console.error(error.message);
-    return 0;
-  }
+    const url = `${process.env.COINGECKO_API}/simple/price?ids=avalanche-2&vs_currencies=usd`;
+    const headers = {
+        'Accept': 'application/json',
+        'x-cg-demo-api-key': process.env.COINGECKO_API_KEY
+    };
+    try {
+        const response = await fetch(url, { headers });
+        if (!response.ok) throw new Error(`CoinGecko API error: ${response.status} ${response.statusText}`);
+        const data = await response.json();
+        const price = data['avalanche-2']?.usd;
+        if (price == null) throw new Error('Unexpected API response structure');
+        return price;
+    } catch (error) {
+        console.error(error.message);
+        return 0;
+    }
 }
 async function handleNewUserFlow(userPhoneNumber, userText, registrationState) {
     if (!userText) {
@@ -724,10 +725,11 @@ async function sendMainMenu(to, user) {
                 messaging_product: "whatsapp", to, type: "interactive",
                 interactive: {
                     type: "button", header: { type: "text", text: "What's Next?" },
-                    body: { text: `Your current balance is\n🔺AVAX: ${user_bal}\n💲${usdValue.toFixed(2)}\n\nChoose an option to continue.`},
+                    body: { text: `Your current balance is\n🔺AVAX: ${user_bal}\n💲${usdValue.toFixed(2)}\n\nChoose an option to continue.` },
                     footer: { text: "Mort by Hot Coffee" },
                     action: { buttons: [{ type: "reply", reply: { id: "games_option", title: "🎮 Games" } }, { type: "reply", reply: { id: "wallet_option", title: "💰 Wallet" } }] }
-                }},
+                }
+            },
         });
         console.log("✅ Main menu sent to:", to);
     } catch (error) {
@@ -809,7 +811,7 @@ async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
         const client = createWalletClient({ account, chain: avalancheFuji, transport: http() });
         const txHash = await client.sendTransaction({ to: transaction.toAddress, value: parseEther(transaction.amount) });
         const explorerUrl = `https://testnet.snowtrace.io/tx/${txHash}`;
-        await sendMessage(userPhoneNumber, `🎉 Transaction Successful!\n${explorerUrl}`);
+        await sendCtaUrlMessage(userPhoneNumber, `🎉 Transaction Successful!`, "View Transaction", explorerUrl);
         await updateDoc(doc(db, 'users', userPhoneNumber), { 'stats.transactionCount': (user.stats.transactionCount || 0) + 1 });
     } catch (txError) {
         console.error("TX Error:", txError.message);
@@ -820,7 +822,7 @@ async function handlePinForTransaction(userPhoneNumber, enteredPin, userState) {
 }
 async function handleSendCrypto(userPhoneNumber, user) {
     userStates.set(userPhoneNumber, { type: 'awaiting_transaction', user: user });
-    
+
     try {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
@@ -923,7 +925,7 @@ async function handlePinForFlip(phone, pin, state) {
         const result = await executeFlipTransaction(user, flip.choice, flip.amount);
         if (result.success) {
             const explorerUrl = `https://testnet.snowtrace.io/tx/${result.hash}`;
-            await sendMessage(phone, `🎉 Bet placed! We'll notify you of the result.\n\nTransaction Hash:\n${explorerUrl}`);
+            await sendCtaUrlMessage(phone, `🎉 Bet placed! We'll notify you of the result.`, "View Transaction", explorerUrl);
         } else {
             await sendMessage(phone, `❌ Bet failed. ${result.error || "Check balance and try again."}`);
         }
@@ -966,6 +968,34 @@ async function executeFlipTransaction(user, choice, amount) {
     } catch (e) {
         console.error("Flip TX Error:", e);
         throw e;
+    }
+}
+async function sendCtaUrlMessage(to, body, buttonText, url) {
+    try {
+        await axios({
+            url: "https://graph.facebook.com/v22.0/696395350222810/messages",
+            method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+            data: {
+                messaging_product: "whatsapp",
+                to,
+                type: "interactive",
+                interactive: {
+                    type: "cta_url",
+                    body: {
+                        text: body
+                    },
+                    action: {
+                        name: "cta_url",
+                        parameters: {
+                            display_text: buttonText,
+                            url: url
+                        }
+                    }
+                }
+            }
+        });
+    } catch (error) {
+        console.error("❌ Error sending CTA URL message:", error.response?.data || error.message);
     }
 }
 async function sendMessage(to, body) {

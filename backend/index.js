@@ -14,9 +14,9 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 dotenv.config();
 
-const flipGameAbi = require('./flipAbi.json');
-const rpsGameAbi = require('./rpsAbi.json');
-const luckyNumberAbi = require('./luckyNumberAbi.json');
+const flipGameAbi = require('./abi/flipAbi.json');
+const rpsGameAbi = require('./abi/rpsAbi.json');
+const luckyNumberAbi = require('./abi/luckyNumberAbi.json');
 
 const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;

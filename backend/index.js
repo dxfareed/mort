@@ -113,7 +113,7 @@ async function createUserInDatabase(userData) {
     try {
         const userRef = doc(db, 'users', userData.whatsappId);
         await setDoc(userRef, userData);
-        const usernameRef = doc(db, 'usernames', userData.username);
+        const usernameRef = doc(db, 'usernames', userData.username.toLowerCase());
         await setDoc(usernameRef, { whatsappId: userData.whatsappId });
         console.log("✅ User created successfully:", userData.whatsappId);
         return true;
@@ -131,6 +131,19 @@ async function checkUsernameExists(username) {
     } catch (error) {
         console.error("❌ Error checking username:", error);
         return true;
+    }
+}
+
+async function getUserByUsername(username) {
+    try {
+        const usernameRef = doc(db, 'usernames', username.toLowerCase());
+        const usernameSnap = await getDoc(usernameRef);
+        if (!usernameSnap.exists()) return null;
+        const { whatsappId } = usernameSnap.data();
+        return await getUserFromDatabase(whatsappId);
+    } catch (error) {
+        console.error("❌ Error fetching user by username:", error);
+        return null;
     }
 }
 
@@ -459,7 +472,7 @@ async function handleUsernameInput(userPhoneNumber, username) {
         await sendMessage(userPhoneNumber, "❌ Invalid username (3-20 chars, letters, numbers, underscores).");
         return;
     }
-    const usernameExists = await checkUsernameExists(username);
+    const usernameExists = await checkUsernameExists(username.toLowerCase());
     if (usernameExists) {
         await sendMessage(userPhoneNumber, "❌ This username is already taken. Please choose another one:");
         return;
@@ -637,7 +650,7 @@ async function handleSendCrypto(userPhoneNumber, user) {
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
             method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
-            data: { messaging_product: "whatsapp", to: userPhoneNumber, type: "interactive", interactive: { type: "button", body: { text: "💸 *Send Crypto*\nPlease enter the transaction details in this format:\n\n`send [amount] to [address]`" }, action: { buttons: [{ type: "reply", reply: { id: "cancel_operation", title: "❌ Cancel" } }] } } }
+            data: { messaging_product: "whatsapp", to: userPhoneNumber, type: "interactive", interactive: { type: "button", body: { text: "💸 *Send Crypto*\nPlease enter the transaction details in one of these formats:\n\n`send [amount] to [address]`\n`send [amount] to [username]`" }, action: { buttons: [{ type: "reply", reply: { id: "cancel_operation", title: "❌ Cancel" } }] } } }
         });
     } catch (error) {
         console.error("❌ Error sending send crypto prompt:", error.response?.data || error.message);
@@ -646,16 +659,40 @@ async function handleSendCrypto(userPhoneNumber, user) {
 }
 
 async function handleTransactionInput(userPhoneNumber, userText, user) {
-    const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40})/i;
+    const regex = /send\s+([\d.]+)\s+to\s+(0x[a-fA-F0-9]{40}|[a-zA-Z0-9_]{3,20})/i;
     const match = userText.match(regex);
     if (!match) {
-        await sendMessage(userPhoneNumber, "❌ Invalid format. Please use:\n`send [amount] to [address]`\n\nOr press Cancel below.");
+        await sendMessage(userPhoneNumber, "❌ Invalid format. Please use:\n`send [amount] to [address]` or\n`send [amount] to [username]`");
         return;
     }
-    const [_, amount, toAddress] = match;
+
+    const [_, amount, recipient] = match;
+    let toAddress;
+    let recipientIdentifier = recipient;
+
+    if (/^0x[a-fA-F0-9]{40}$/i.test(recipient)) {
+        toAddress = recipient;
+        if (toAddress.toLowerCase() === user.wallet.primaryAddress.toLowerCase()) {
+            await sendMessage(userPhoneNumber, "❌ You cannot send crypto to yourself.");
+            return;
+        }
+    } else {
+        const recipientUser = await getUserByUsername(recipient);
+        if (!recipientUser) {
+            await sendMessage(userPhoneNumber, `❌ User "${recipient}" not found. Please check the username and try again.`);
+            return;
+        }
+        if (recipientUser.whatsappId === userPhoneNumber) {
+            await sendMessage(userPhoneNumber, "❌ You cannot send crypto to yourself.");
+            return;
+        }
+        toAddress = recipientUser.wallet.primaryAddress;
+        recipientIdentifier = `${recipientUser.username} (${toAddress.substring(0, 6)}...${toAddress.substring(38)})`;
+    }
+
     userStates.set(userPhoneNumber, { type: 'awaiting_pin_for_transaction', user: user, transaction: { amount, toAddress } });
     try {
-        const bodyText = `🔐 *Confirm Transaction*\n\n*Amount:* ${amount} AVAX\n*To:* ${toAddress}\n\nPlease enter your PIN to confirm.`
+        const bodyText = `🔐 *Confirm Transaction*\n\n*Amount:* ${amount} AVAX\n*To:* ${recipientIdentifier}\n\nPlease enter your PIN to confirm.`
         await axios({
             url: `https://graph.facebook.com/v22.0/696395350222810/messages`,
             method: "POST", headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
@@ -663,7 +700,7 @@ async function handleTransactionInput(userPhoneNumber, userText, user) {
         });
     } catch (error) {
         console.error("❌ Error sending PIN prompt:", error.response?.data || error.message);
-        await sendMessage(userPhoneNumber, `🔐 Confirm Transaction\n💸 Amount: ${amount} AVAX\nTo: ${toAddress}\n\nEnter your PIN:`);
+        await sendMessage(userPhoneNumber, `🔐 Confirm Transaction\n💸 Amount: ${amount} AVAX\nTo: ${recipientIdentifier}\n\nEnter your PIN:`);
     }
 }
 

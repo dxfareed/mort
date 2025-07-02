@@ -11,13 +11,16 @@ module.exports = {
       accounts: [process.env.PRIVATE_KEY]
     }
   },
+  sourcify: {
+  enabled: true
+  },
   etherscan: {
     apiKey: {
-      snowtrace: "SNOWTRACE"   
+      fuji: "SNOWTRACE"   
     },
     customChains: [
       {
-        network: "snowtrace",
+        network: "fuji",
         chainId: 43113,
         urls: {
           apiURL:  "https://api.routescan.io/v2/network/testnet/evm/43113/etherscan",

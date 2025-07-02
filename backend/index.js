@@ -1,4 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
 import express from "express";
 import axios from "axios";
 import { initializeApp } from "firebase/app";
@@ -18,23 +17,26 @@ const flipGameAbi = require('./abi/flipAbi.json');
 const rpsGameAbi = require('./abi/rpsAbi.json');
 const luckyNumberAbi = require('./abi/luckyNumberAbi.json');
 
-const WEBHOOK_VERIFY_TOKEN = process.env.Whatsapp_hook_token;
+const WEBHOOK_VERIFY_TOKEN = process.env.WHATSAPP_HOOK_TOKEN;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PORT = process.env.PORT;
+
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
-const PORT = process.env.PORT;
-const FLIP_GAME_CONTRACT_ADDRESS = '0x06262a1934E1a8fDD5d4bc1D9EcF5D141b1Cb36F';
-const RPS_GAME_CONTRACT_ADDRESS = '0xF0B8EA32c00Ab17C7B0035bD38f53a2A6324207E';
-const LUCKY_NUMBER_GAME_CONTRACT_ADDRESS = '0x854e1311a34138Ac43B6C68ffECa2a7a6853f28c';
+
+const FLIP_GAME_CONTRACT_ADDRESS = process.env.FLIP_GAME_CONTRACT_ADDRESS; //verified
+const RPS_GAME_CONTRACT_ADDRESS = process.env.RPS_GAME_CONTRACT_ADDRESS; //verified
+const LUCKY_NUMBER_GAME_CONTRACT_ADDRESS = process.env.LUCKY_NUMBER_GAME_CONTRACT_ADDRESS; //verified
+
 const WSS_RPC_URL = process.env.AVAX_RPC_WSS_URL;
 
 const firebaseConfig = {
-    apiKey: process.env.FIREBASE_API_KEY,
-    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
-    appId: process.env.FIREBASE_APP_ID,
+    apiKey: "AIzaSyAg4wuPWMxgDxGYUpxDT-2vAI34AjwvcQg",
+    authDomain: "mypiggybanksave.firebaseapp.com",
+    projectId: "mypiggybanksave",
+    storageBucket: "mypiggybanksave.firebasestorage.app",
+    messagingSenderId: "1081850835040",
+    appId: "1:1081850835040:web:80eef2a1451af90b3b9305",
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
